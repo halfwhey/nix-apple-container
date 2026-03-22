@@ -82,6 +82,7 @@ After `darwin-rebuild switch`, the container runtime starts, the image is pulled
 | `env` | attrs of strings | `{}` | Environment variables |
 | `volumes` | list of strings | `[]` | Volume mounts (`host-path:container-path`, macOS 26+) |
 | `autoCreateMounts` | bool | `true` | Create host directories for volume mounts if they don't exist |
+| `pull` | enum | `"missing"` | `"missing"`, `"always"`, or `"never"` — image pull policy |
 | `extraArgs` | list of strings | `[]` | Extra arguments passed to `container run` |
 
 Common `extraArgs` flags:

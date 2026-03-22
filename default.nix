@@ -52,6 +52,16 @@ let
         default = true;
         description = "Automatically create host directories for volume mounts if they don't exist.";
       };
+      pull = lib.mkOption {
+        type = lib.types.enum [ "missing" "always" "never" ];
+        default = "missing";
+        description = ''
+          Image pull policy.
+          - "missing": pull only if not cached locally (default)
+          - "always": pull before every start (keeps mutable tags like :latest fresh)
+          - "never": never pull (image must exist locally)
+        '';
+      };
       extraArgs = lib.mkOption {
         type = lib.types.listOf lib.types.str;
         default = [ ];
@@ -125,6 +135,9 @@ let
     in pkgs.writeShellScript "container-run-${name}" ''
       ${bin} stop ${lib.escapeShellArg name} 2>/dev/null || true
       ${bin} rm ${lib.escapeShellArg name} 2>/dev/null || true
+      ${lib.optionalString (c.pull == "always") ''
+        ${bin} image pull ${lib.escapeShellArg c.image} || true
+      ''}
       exec ${lib.escapeShellArgs args}
     '';
 
