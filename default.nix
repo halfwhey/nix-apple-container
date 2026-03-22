@@ -9,12 +9,14 @@ let
     options = {
       image = lib.mkOption {
         type = lib.types.package;
-        description = "OCI image derivation (e.g. from dockerTools.buildLayeredImage).";
+        description =
+          "OCI image derivation (e.g. from dockerTools.buildLayeredImage).";
       };
       autoLoad = lib.mkOption {
         type = lib.types.bool;
         default = true;
-        description = "Load this image into the container runtime on activation.";
+        description =
+          "Load this image into the container runtime on activation.";
       };
     };
   };
@@ -61,8 +63,8 @@ let
     ${runAs} ${bin} image load < ${img.image}
   '') autoLoadImages);
 
-
-  declaredContainerNames = lib.concatStringsSep " " (lib.attrNames cfg.containers);
+  declaredContainerNames =
+    lib.concatStringsSep " " (lib.attrNames cfg.containers);
 
   gcScript = lib.concatStrings [
     (lib.optionalString (cfg.gc.pruneContainers == "stopped") ''
@@ -92,13 +94,10 @@ let
   ];
 
   mkContainerArgs = name: c:
-    [ bin "run" "--name" name ]
-    ++ (lib.concatMap (e: [ "--env" e ])
+    [ bin "run" "--name" name ] ++ (lib.concatMap (e: [ "--env" e ])
       (lib.mapAttrsToList (k: v: "${k}=${v}") c.env))
-    ++ (lib.concatMap (v: [ "--volume" v ]) c.volumes)
-    ++ c.extraArgs
-    ++ [ c.image ]
-    ++ c.cmd;
+    ++ (lib.concatMap (v: [ "--volume" v ]) c.volumes) ++ c.extraArgs
+    ++ [ c.image ] ++ c.cmd;
 
 in {
   options.services.containerization = {
@@ -107,7 +106,8 @@ in {
     user = lib.mkOption {
       type = lib.types.str;
       default = config.system.primaryUser;
-      description = "User to run container commands as (activation runs as root).";
+      description =
+        "User to run container commands as (activation runs as root).";
     };
 
     package = lib.mkOption {
@@ -153,29 +153,25 @@ in {
   };
 
   config = lib.mkMerge [
-    # Teardown: runs when module is disabled
+    # Teardown: runs when module is disabled (guarded — only if state exists)
     (lib.mkIf (!cfg.enable) {
       system.activationScripts.postActivation.text = lib.mkAfter ''
-        echo "nix-apple-container: tearing down..."
-        CONTAINER_USER="${cfg.user}"
-        CONTAINER_HOME=$(eval echo "~$CONTAINER_USER")
-
-        # Stop the runtime
-        sudo -u "$CONTAINER_USER" -- container system stop 2>/dev/null || true
-
-        # Remove user data and kernels
+        CONTAINER_HOME=$(eval echo "~${cfg.user}")
         APP_SUPPORT="$CONTAINER_HOME/Library/Application Support/com.apple.container"
+
         if [ -d "$APP_SUPPORT" ]; then
+          echo "nix-apple-container: tearing down..."
+
+          ${runAs} ${bin} system stop 2>/dev/null || true
+
           echo "nix-apple-container: removing data ($APP_SUPPORT)..."
           rm -rf "$APP_SUPPORT"
+
+          ${runAs} defaults delete com.apple.container 2>/dev/null || true
+
+          pkgutil --pkg-info com.apple.container-installer &>/dev/null && \
+            sudo pkgutil --forget com.apple.container-installer 2>/dev/null || true
         fi
-
-        # Remove user preference defaults
-        sudo -u "$CONTAINER_USER" -- defaults delete com.apple.container 2>/dev/null || true
-
-        # Clean up package receipt if it exists (from .pkg installs)
-        pkgutil --pkg-info com.apple.container-installer &>/dev/null && \
-          sudo pkgutil --forget com.apple.container-installer 2>/dev/null || true
       '';
     })
 
@@ -190,19 +186,22 @@ in {
             ProgramArguments = mkContainerArgs name c;
             RunAtLoad = true;
             KeepAlive = true;
-            StandardOutPath = "/Users/${cfg.user}/Library/Logs/container-${name}.log";
-            StandardErrorPath = "/Users/${cfg.user}/Library/Logs/container-${name}.err";
+            StandardOutPath =
+              "/Users/${cfg.user}/Library/Logs/container-${name}.log";
+            StandardErrorPath =
+              "/Users/${cfg.user}/Library/Logs/container-${name}.err";
           };
-        }
-      ) autoStartContainers;
+        }) autoStartContainers;
 
       # GC runs before launchd setup so stale containers are cleaned
       # before new ones try to start
-      system.activationScripts.preActivation.text = lib.mkAfter (
-        lib.concatStrings [
+      system.activationScripts.preActivation.text = lib.mkAfter
+        (lib.concatStrings [
           ''
-            echo "nix-apple-container: starting runtime..."
-            ${runAs} ${bin} system start --disable-kernel-install 2>/dev/null || true
+            if ! ${runAs} ${bin} system info &>/dev/null; then
+              echo "nix-apple-container: starting runtime..."
+              ${runAs} ${bin} system start --disable-kernel-install 2>/dev/null || true
+            fi
             KERNEL_DIR="$(eval echo "~${cfg.user}")/Library/Application Support/com.apple.container/kernels"
             if [ ! -d "$KERNEL_DIR" ] || [ -z "$(ls -A "$KERNEL_DIR" 2>/dev/null)" ]; then
               echo "nix-apple-container: installing kernel..."
@@ -210,16 +209,14 @@ in {
             fi
           ''
           (lib.optionalString cfg.gc.automatic gcScript)
-        ]
-      );
+        ]);
 
       # Image loading runs after launchd setup
-      system.activationScripts.postActivation.text = lib.mkAfter (
-        lib.optionalString (autoLoadImages != { }) ''
+      system.activationScripts.postActivation.text = lib.mkAfter
+        (lib.optionalString (autoLoadImages != { }) ''
           echo "nix-apple-container: loading images..."
           ${imageLoadScript}
-        ''
-      );
+        '');
     })
   ];
 }
