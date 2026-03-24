@@ -10,6 +10,7 @@ A nix-darwin module for declaratively managing [Apple Containerization](https://
 - Manages the Kata Linux kernel as a Nix derivation (no runtime download from GitHub)
 - Starts the container runtime and installs the kernel automatically
 - Declares containers that run as launchd user agents (automatically recreated on config change)
+- Containers are addressable by name from the host and from other containers (e.g. `foo.test` for a container named `foo`)
 - Auto-creates host directories for volume mounts
 - Optional Linux builder container for building `aarch64-linux` derivations on macOS
 - Reconciles running containers against config — removes undeclared containers and their launchd agents
@@ -20,6 +21,17 @@ A nix-darwin module for declaratively managing [Apple Containerization](https://
 - Apple Silicon Mac (aarch64-darwin)
 - macOS 15+ (macOS 26 required for volume mounts and full networking)
 - nix-darwin
+
+### Tested on
+
+```
+macOS: 26.3 (25D125)
+Arch: arm64
+Nix: nix (Determinate Nix 3.17.1) 2.33.3
+Apple Container: container CLI version 0.10.0 (build: release, commit: 6bdb647)
+nix-darwin: github:LnL7/nix-darwin/da529ac (2026-03-08)
+nixpkgs: github:nixos/nixpkgs/e802360 (2026-03-14)
+```
 
 ## Usage
 
@@ -123,7 +135,9 @@ After `darwin-rebuild switch`, the container runtime starts, the image is pulled
 | `sshPort` | port | `31022` | Host port for SSH to the builder |
 | `maxJobs` | int | `4` | Max parallel build jobs |
 
-Runs a Nix builder container for aarch64-linux builds. Uses a known SSH key pair (builder only listens on localhost). When `nix.enable = true`, configures the builder declaratively via `nix.buildMachines` and `nix.distributedBuilds`. When `nix.enable = false` (e.g. Determinate Nix), writes idempotently to `/etc/nix/nix.custom.conf` and `/etc/nix/machines`, only restarting the daemon when config changes.
+Runs a Nix builder container for aarch64-linux builds. The default image (`ghcr.io/halfwhey/nix-builder`) is built from the `builder/Dockerfile` in this repo — it's a minimal `nixos/nix` image with sshd. Uses a known SSH key pair (builder only listens on localhost, same security model as nixpkgs' `darwin.linux-builder`).
+
+When `nix.enable = true`, configures the builder declaratively via `nix.buildMachines` and `nix.distributedBuilds`. When `nix.enable = false` (e.g. Determinate Nix), writes idempotently to `/etc/nix/nix.custom.conf` and `/etc/nix/machines`, only restarting the daemon when config changes.
 
 **Bootstrap**: First rebuild starts the builder. Second rebuild can use it for Linux derivations (e.g. nix2container images with `aarch64-linux` packages).
 
