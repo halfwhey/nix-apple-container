@@ -14,6 +14,7 @@ A nix-darwin module for declaratively managing [Apple Containerization](https://
 - Optional Linux builder container for building `aarch64-linux` derivations on macOS
 - Reconciles running containers against config — removes undeclared containers and their launchd agents
 - Garbage-collects containers and images not in your config
+- Loads Nix-built OCI images via [nix2container](https://github.com/nlewo/nix2container) — no tarballs in the Nix store
 - Selective teardown when disabled — optionally preserves pulled images across disable/enable cycles
 
 ## Requirements
@@ -64,6 +65,7 @@ After `darwin-rebuild switch`, the container runtime starts, the image is pulled
 | `enable` | bool | `false` | Install the CLI, start the runtime, enable the module |
 | `user` | string | `config.system.primaryUser` | User to run container commands as (activation scripts run as root) |
 | `package` | package | *built from .pkg* | Override the container CLI package |
+| `images` | attrs of packages | `{}` | nix2container images to load (see [Nix-built images](#nix-built-images-with-nix2container)) |
 
 ### `services.containerization.kernel`
 
@@ -125,7 +127,7 @@ After `darwin-rebuild switch`, the container runtime starts, the image is pulled
 
 Runs a Nix builder container for aarch64-linux builds. Uses a known SSH key pair (builder only listens on localhost). Writes to `/etc/nix/nix.custom.conf` (Determinate Nix compatible).
 
-**Bootstrap**: First rebuild starts the builder. Second rebuild can use it for Linux derivations (e.g. `dockerTools.buildImage`).
+**Bootstrap**: First rebuild starts the builder. Second rebuild can use it for Linux derivations (e.g. nix2container images with `aarch64-linux` packages).
 
 ## Examples
 
@@ -190,6 +192,58 @@ services.containerization = {
   kernel.binaryPath = "opt/kata/share/kata-containers/vmlinux-6.18.5-177";
 };
 ```
+
+### Nix-built images with nix2container
+
+Build OCI images with [nix2container](https://github.com/nlewo/nix2container) and load them into the container runtime without storing full tarballs in the Nix store. Only a tiny JSON metadata file lives in the store — layers are streamed on-the-fly from existing Nix store paths at activation time.
+
+Add the nix2container flake input:
+
+```nix
+{
+  inputs = {
+    nix2container.url = "github:nlewo/nix2container";
+    nix2container.inputs.nixpkgs.follows = "nixpkgs";
+  };
+}
+```
+
+Then declare images and containers. Images must contain `aarch64-linux` packages since Apple containers run Linux VMs:
+
+```nix
+{ inputs, pkgs, ... }:
+let
+  nix2container = inputs.nix2container.packages.${pkgs.system}.nix2container;
+  pkgsLinux = import pkgs.path { system = "aarch64-linux"; };
+in {
+  services.containerization = {
+    enable = true;
+    linuxBuilder.enable = true;  # needed to build aarch64-linux derivations
+
+    images.greeter = nix2container.buildImage {
+      name = "greeter";
+      tag = "latest";
+      config.Cmd = [
+        "${pkgsLinux.busybox}/bin/sh" "-c"
+        "echo 'Listening on :8080...' && while true; do echo -e 'HTTP/1.1 200 OK\r\n\r\nHello from a Nix-built container!' | ${pkgsLinux.busybox}/bin/nc -l -p 8080; done"
+      ];
+    };
+
+    containers.greeter = {
+      image = "greeter:latest";
+      autoStart = true;
+      pull = "never";  # image is loaded locally, not from a registry
+      extraArgs = [ "--publish" "8080:8080" ];
+    };
+  };
+}
+```
+
+Test it with `curl http://localhost:8080` after rebuild.
+
+Images are only re-loaded when their content changes (tracked via Nix store path). Removing an image from config cleans up the tracking marker; the image data itself is cleaned up by `gc.pruneImages`.
+
+> **Note**: Building nix2container images requires `aarch64-linux` packages. Enable `linuxBuilder` and rebuild twice: the first starts the builder, the second builds and loads the image.
 
 ## Uninstall
 

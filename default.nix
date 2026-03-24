@@ -141,6 +141,40 @@ let
     '')
   ];
 
+  imageLoadScript = let
+    declaredImageNames = lib.concatStringsSep " " (lib.attrNames cfg.images);
+  in lib.optionalString (cfg.images != { }) ''
+    MARKER_DIR="/var/lib/nix-apple-container/images"
+    mkdir -p "$MARKER_DIR"
+
+    ${lib.concatStrings (lib.mapAttrsToList (name: img: ''
+      if [ "$(cat "$MARKER_DIR/${name}" 2>/dev/null)" != "${img.copyTo}" ]; then
+        echo "nix-apple-container: loading image ${img.imageName}:${img.imageTag}..."
+        tmpdir=$(mktemp -d -t nix-apple-container-image.XXXXXX)
+        "${img.copyTo}/bin/copy-to" "oci:$tmpdir:${img.imageName}:${img.imageTag}"
+        tar -C "$tmpdir" -cf "$tmpdir.tar" .
+        chmod 644 "$tmpdir.tar"
+        ${runAs} ${bin} image load -i "$tmpdir.tar"
+        rm -rf "$tmpdir" "$tmpdir.tar"
+        echo "${img.copyTo}" > "$MARKER_DIR/${name}"
+      fi
+    '') cfg.images)}
+
+    # Clean stale markers for images no longer in config
+    DECLARED_IMAGES="${declaredImageNames}"
+    for marker in "$MARKER_DIR"/*; do
+      [ -f "$marker" ] || continue
+      mname="$(basename "$marker")"
+      KEEP=false
+      for d in $DECLARED_IMAGES; do
+        if [ "$mname" = "$d" ]; then KEEP=true; break; fi
+      done
+      if [ "$KEEP" = "false" ]; then
+        rm -f "$marker"
+      fi
+    done
+  '';
+
   mkContainerRunScript = name: c:
     let
       args = [ bin "run" "--name" name ]
@@ -189,6 +223,12 @@ in {
       type = lib.types.attrsOf containerSubmodule;
       default = { };
       description = "Containers to manage.";
+    };
+
+    images = lib.mkOption {
+      type = lib.types.attrsOf lib.types.package;
+      default = { };
+      description = "nix2container images to load. Each value must be a nix2container buildImage output with copyTo, imageName, and imageTag passthru attributes.";
     };
 
     kernel = {
@@ -282,6 +322,8 @@ in {
           pkgutil --pkg-info com.apple.container-installer &>/dev/null && \
             sudo pkgutil --forget com.apple.container-installer 2>/dev/null || true
         fi
+
+        rm -rf /var/lib/nix-apple-container
       '';
     })
 
@@ -321,6 +363,7 @@ in {
                 --force 2>/dev/null || true
             fi
           ''
+          imageLoadScript
           mkMountDirsScript
           (lib.optionalString cfg.gc.automatic gcScript)
         ]);
