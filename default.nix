@@ -439,24 +439,6 @@ in {
           UserKnownHostsFile /dev/null
       '';
 
-      system.activationScripts.postActivation.text = lib.mkAfter ''
-        echo "nix-apple-container: waiting for linux builder..."
-        BUILDER_READY=false
-        for _i in $(seq 1 30); do
-          if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-               -i /etc/nix/builder_ed25519 -p ${
-                 toString cfg.linuxBuilder.sshPort
-               } \
-               root@localhost true 2>/dev/null; then
-            BUILDER_READY=true
-            break
-          fi
-          sleep 1
-        done
-        if [ "$BUILDER_READY" = "false" ]; then
-          echo "nix-apple-container: WARNING: linux builder SSH not responding after 30s" >&2
-        fi
-      '';
     })
 
     # Linux builder — declarative Nix config (plain nix-darwin with nix.enable = true)
