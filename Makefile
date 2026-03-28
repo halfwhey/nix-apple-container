@@ -10,7 +10,7 @@ else
 SED_I = sed -i
 endif
 
-.PHONY: build push ci ci-status release update-container update-kernel update-nix-builder bump-default clean
+.PHONY: build push ci ci-status release update-container update-kernel update-nix-builder bump-linux-builder clean
 
 build: ## Build the builder image locally (multi-arch)
 	docker buildx build --platform linux/amd64,linux/arm64 \
@@ -45,7 +45,7 @@ update-kernel: ## Check and update kata-containers kernel to latest release
 update-nix-builder: ## Check and update nixos/nix base image to latest release
 	@scripts/update-nix-builder.sh
 
-bump-default: ## Bump linuxBuilder default image in default.nix to current NIX_VERSION
+bump-linux-builder: ## Bump linuxBuilder default image in default.nix to current NIX_VERSION
 	$(SED_I) 's|ghcr.io/halfwhey/nix-builder:[^"]*|ghcr.io/halfwhey/nix-builder:$(NIX_VERSION)|' default.nix
 	git add default.nix
 	git diff --cached --quiet || git commit -m "chore: bump linuxBuilder default to $(NIX_VERSION)"
