@@ -55,11 +55,10 @@ Add the flake input:
 ```nix
 {
   inputs = {
-    # Follow master — picks up nix-builder updates automatically:
+    # Follow master — picks up nix-builder image updates automatically:
     nix-apple-container.url = "github:halfwhey/nix-apple-container";
-
     # Pin to a release for stability:
-    nix-apple-container.url = "github:halfwhey/nix-apple-container/v0.0.2";
+    # nix-apple-container.url = "github:halfwhey/nix-apple-container/v0.0.2";
 
     nix-apple-container.inputs.nixpkgs.follows = "nixpkgs";
   };
@@ -130,25 +129,40 @@ services.containerization = {
 };
 ```
 
-### Custom kernel
+### Custom versions
 
-Override `kernel` with a flat file derivation containing the kernel binary:
+Override `package` (apple/container CLI) or `kernel` (kata-containers) with a different version:
 
 ```nix
 services.containerization = {
   enable = true;
-  kernel = pkgs.stdenv.mkDerivation {
-    pname = "my-kernel";
-    version = "3.26.0";
-    outputHash = "sha256-...";
-    outputHashMode = "flat";
-    nativeBuildInputs = with pkgs; [ cacert curl zstd gnutar ];
-    buildCommand = ''
-      curl -L -o kata.tar.zst "https://github.com/kata-containers/kata-containers/releases/download/3.26.0/kata-static-3.26.0-arm64.tar.zst"
-      tar --zstd -xf kata.tar.zst ./opt/kata/share/kata-containers/
-      cp -L ./opt/kata/share/kata-containers/vmlinux.container $out
-    '';
+
+  package = pkgs.callPackage "${inputs.nix-apple-container}/package.nix" {
+    version = "0.11.0";
+    hash = "sha256-...";
   };
+
+  kernel = pkgs.callPackage "${inputs.nix-apple-container}/kernel.nix" {
+    version = "3.27.0";
+    hash = "sha256-...";
+  };
+};
+```
+
+For a fully custom kernel (different source or extraction logic), pass any flat-file derivation to `kernel`:
+
+```nix
+services.containerization.kernel = pkgs.stdenv.mkDerivation {
+  pname = "my-kernel";
+  version = "3.26.0";
+  outputHash = "sha256-...";
+  outputHashMode = "flat";
+  nativeBuildInputs = with pkgs; [ cacert curl zstd gnutar ];
+  buildCommand = ''
+    curl -L -o kata.tar.zst "https://github.com/kata-containers/kata-containers/releases/download/3.26.0/kata-static-3.26.0-arm64.tar.zst"
+    tar --zstd -xf kata.tar.zst ./opt/kata/share/kata-containers/
+    cp -L ./opt/kata/share/kata-containers/vmlinux.container $out
+  '';
 };
 ```
 
@@ -231,7 +245,6 @@ Set `enable = false` and rebuild. The module will:
 If you remove the module import entirely (instead of `enable = false`), no cleanup runs. Keep the import with `enable = false` first, rebuild, then remove the import. If you find any lingering artifacts please open an issue.
 
 [apple-containerization]: https://github.com/apple/containerization
-[builder-ci]: https://github.com/halfwhey/nix-apple-container/actions/workflows/build-builder.yml
 [nix-darwin]: https://github.com/LnL7/nix-darwin
 [nix2container]: https://github.com/nlewo/nix2container
 [options]: docs/options.md

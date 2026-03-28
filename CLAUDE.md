@@ -7,9 +7,14 @@ Technical reference for working on nix-apple-container.
 This is a nix-darwin module that wraps Apple's [Containerization](https://github.com/apple/containerization) framework.
 
 - `default.nix` — the nix-darwin module
-- `package.nix` — derivation that extracts the `container` CLI from Apple's signed `.pkg`
-- `kernel.nix` — fetchurl derivation for the kata-containers kernel tarball
+- `package.nix` — derivation that extracts the `container` CLI from Apple's signed `.pkg`; accepts overridable `version` and `hash` args
+- `kernel.nix` — fixed-output derivation that fetches the kata-containers kernel tarball via `curl` and extracts the binary; accepts overridable `version` and `hash` args
+- `builder/Dockerfile` — nix-builder image (`FROM nixos/nix:<version>`); the Nix version in the `FROM` line is used as the image tag
 - `builder/builder_ed25519` / `builder/builder_ed25519.pub` — known SSH key pair for the linux builder (intentionally public, same model as nixpkgs' `darwin.linux-builder`)
+- `Makefile` — build/push/release/update targets for the builder image and module
+- `scripts/` — update scripts: `update-container.sh`, `update-kernel.sh`, `update-nix-builder.sh`
+- `.github/workflows/build-builder.yml` — builds and pushes the nix-builder image on changes to `builder/**`; tags with the Nix version; commits updated default image back to `default.nix`
+- `.github/workflows/update-nix-builder.yml` — weekly scheduled workflow; checks Docker Hub for a newer `nixos/nix` tag and bumps `builder/Dockerfile` if stale, triggering `build-builder.yml` via the path filter
 
 The flake exposes `darwinModules.default`, `packages.aarch64-darwin.default`, and `packages.aarch64-darwin.kernel`.
 
@@ -79,7 +84,13 @@ When disabled:
 
 ### Linux builder (linuxBuilder.enable = true)
 
-Runs `nixos/nix` as an Apple container with sshd, configured as a Nix remote builder for aarch64-linux builds. Uses a known SSH key pair committed to the repo (same security model as nixpkgs' `darwin.linux-builder` — builder only listens on localhost).
+Runs `ghcr.io/halfwhey/nix-builder` (based on `nixos/nix`) as an Apple container with sshd, configured as a Nix remote builder for aarch64-linux builds. Uses a known SSH key pair committed to the repo (same security model as nixpkgs' `darwin.linux-builder` — builder only listens on localhost).
+
+The default image tag in `default.nix` (`services.containerization.linuxBuilder.image`) tracks the Nix version used in the Dockerfile (e.g. `2.34.3`), not `:latest`. It is bumped automatically by `build-builder.yml` after each successful image push. The auto-update cascade is:
+1. `update-nix-builder.yml` (weekly) detects a newer `nixos/nix` tag → bumps `builder/Dockerfile` → pushes to master
+2. `build-builder.yml` fires on the `builder/**` path change → builds and pushes image tagged `:<nix-version>` → commits updated default to `default.nix`
+
+Users can override the image via `services.containerization.linuxBuilder.image = "ghcr.io/halfwhey/nix-builder:2.34.3"`.
 
 Builder config uses backend-specific declarative options when possible:
 - When `config.nix.enable = true` (plain nix-darwin): sets `nix.buildMachines`, `nix.distributedBuilds`, `nix.settings.builders-use-substitutes` declaratively. nix-darwin writes the files and handles daemon restarts.
@@ -174,7 +185,9 @@ Pre-building OCI layout dirs as Nix derivations (`runCommand` with `copyTo`) and
 Unlike Docker (single VM hosting all containers), each container runs in its own lightweight VM with a dedicated Linux kernel. The framework provides the kernel (kata-containers) and a Swift-based init system (vminitd) as PID 1.
 
 ### Kernel source
-The Linux kernel comes from [kata-containers](https://github.com/kata-containers/kata-containers/releases). `kernel.nix` is a fixed-output derivation that fetches the release tarball, extracts the kernel binary via the `vmlinux.container` symlink, and stores just the binary (~16MB) in the Nix store. The activation script symlinks it into `~/Library/Application Support/com.apple.container/kernels/` with a `default.kernel-arm64` symlink.
+The Linux kernel comes from [kata-containers](https://github.com/kata-containers/kata-containers/releases). `kernel.nix` is a fixed-output `stdenv.mkDerivation` that fetches the release tarball via `curl` in `buildCommand`, extracts the kernel binary via the `vmlinux.container` symlink, and stores just the binary (~16MB) in the Nix store. The activation script symlinks it into `~/Library/Application Support/com.apple.container/kernels/` with a `default.kernel-arm64` symlink.
+
+`kernel.nix` accepts `version` and `hash` as overridable function arguments (defaults to the pinned version). Users can call `pkgs.callPackage "${inputs.nix-apple-container}/kernel.nix" { version = "..."; hash = "..."; }` to use a different release without forking the module. Same pattern applies to `package.nix` for the container CLI.
 
 ### Networking
 - macOS 15: limited networking, no container-to-container, no custom networks
