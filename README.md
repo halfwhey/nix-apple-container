@@ -58,7 +58,7 @@ Add the flake input:
     # Follow master — picks up nix-builder image updates automatically:
     nix-apple-container.url = "github:halfwhey/nix-apple-container";
     # Pin to a release for stability:
-    # nix-apple-container.url = "github:halfwhey/nix-apple-container/v0.0.2";
+    # nix-apple-container.url = "github:halfwhey/nix-apple-container/v0.0.3";
 
     nix-apple-container.inputs.nixpkgs.follows = "nixpkgs";
   };
