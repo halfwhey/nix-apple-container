@@ -92,12 +92,11 @@ let
     };
   };
 
-  # Resolve nix2container images (keyed by attr name)
+  # Resolve nix2container image metadata (keyed by attr name)
   resolvedImages = lib.mapAttrs (name: img: {
-    ociDir = pkgs.runCommand "oci-image-${name}" { } ''
-      mkdir -p $out
-      "${img.copyTo}/bin/copy-to" "oci:$out:${img.imageName}:${img.imageTag}"
-    '';
+    copyTo = img.copyTo;
+    imageName = img.imageName;
+    imageTag = img.imageTag;
     imageRef = "${img.imageName}:${img.imageTag}";
   }) cfg.images;
 
@@ -153,10 +152,13 @@ let
       in ''
         if ! ${runAs} ${bin} image ls 2>/dev/null | grep -qF "${r.imageRef}"; then
           echo "nix-apple-container: loading image ${r.imageRef}..."
-          TMPTAR=$(mktemp)
-          tar -C "${r.ociDir}" -cf "$TMPTAR" .
-          ${runAs} ${bin} image load -i "$TMPTAR"
-          rm -f "$TMPTAR"
+          TMPDIR=$(mktemp -d)
+          trap 'rm -rf "$TMPDIR"' EXIT
+          "${r.copyTo}/bin/copy-to" "oci:$TMPDIR:${r.imageName}:${r.imageTag}"
+          tar cf "$TMPDIR.tar" -C "$TMPDIR" .
+          chmod 644 "$TMPDIR.tar"
+          ${runAs} ${bin} image load -i "$TMPDIR.tar"
+          rm -f "$TMPDIR.tar"
         fi
       '') cfg.images)}
   '';

@@ -92,7 +92,7 @@ Two image sources:
 - **`images.*`** (`attrsOf package`): nix2container `buildImage` or `pullImage`. Built at Nix eval time, loaded into the runtime via `container image load` at activation time.
 - **Registry images**: Containers referencing images not in `images.*` are pulled automatically by the container runtime when `container run` is invoked. No Nix-side fetch needed.
 
-**Image loading**: nix2container images are exported to OCI layout dirs at build time (`resolvedImages`). At activation time, the module checks `container image ls` for each image and loads missing ones via `container image load -i <tarball>`. The tar is created from the OCI dir on the fly and deleted after loading. `container image load` handles all internal details (Image Index wrapping, blob storage, state.json updates).
+**Image loading**: At activation time, nix2container's `copyTo` exports the image to a temp OCI layout dir, which is tarred and loaded via `container image load -i`. The OCI dir must NOT be pre-built in the Nix store — `container image load` fails on tars created from read-only Nix store paths. The temp dir and tar are deleted after loading.
 
 **Critical**: Image loading runs in `preActivation` (not postActivation) because launchd starts containers between pre and post.
 
@@ -156,6 +156,12 @@ Running `container system start` as a persistent `KeepAlive = true` daemon cause
 
 ### Root user context during activation
 `darwin-rebuild switch` runs as root. `container image pull` stores data under `$HOME/Library/Application Support/com.apple.container/`. When run as root, this becomes `/var/root/Library/...` — the wrong location. The container runtime running as the actual user can't find the images. Error: `NSCocoaErrorDomain Code=4 ... couldn't be moved to "sha256"`. Fixed by wrapping all container CLI calls with `sudo -u <user> --`.
+
+### `container image load` fails on Nix store tars
+Pre-building OCI layout dirs as Nix derivations (`runCommand` with `copyTo`) and tarring them at activation time produces tars that `container image load` rejects with `failed to create file: ./oci-layout`. The command extracts the tar to its cwd and fails on read-only or permission issues from Nix store paths. Fixed by running `copyTo` at activation time into a writable temp dir, same as the original approach.
+
+### macOS bsdtar argument ordering
+`tar -C dir -cf file .` doesn't work on macOS bsdtar — the `-C` before `-cf` is ignored, producing empty archives. Use `tar cf file -C dir .` instead.
 
 ### Kernel install prompt
 `container system start` prompts interactively: "Install the recommended default kernel from [URL]? [Y/n]:". This hangs non-interactive environments. The module uses `--disable-kernel-install` on `system start` and manages the kernel declaratively — `kernel.nix` extracts the binary into the Nix store, and the activation script symlinks it into the runtime's `kernels/` directory.
