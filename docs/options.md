@@ -8,13 +8,14 @@
 | `user` | string | `config.system.primaryUser` | User to run container commands as (activation scripts run as root) |
 | `package` | package | *built from .pkg* | Override the container CLI package |
 | `images` | attrs of packages | `{}` | nix2container images to load (buildImage or pullImage) |
+| `preserveImagesOnDisable` | bool | `false` | Keep loaded images when the module is disabled |
+| `preserveVolumesOnDisable` | bool | `false` | Keep runtime-managed volume data when the module is disabled (bind mounts are always preserved) |
 
 ## `services.containerization.kernel`
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `package` | package | *kata 3.26.0 arm64* | Kata kernel tarball — lives in Nix store, survives teardown |
-| `binaryPath` | string | `"opt/kata/share/..."` | Path to the kernel binary within the tar archive |
+| *(top-level)* | package | *kata 3.26.0 arm64* | Flat file derivation of the kernel binary — symlinked as `default.kernel-arm64` in the runtime |
 
 ## `services.containerization.containers.<name>`
 

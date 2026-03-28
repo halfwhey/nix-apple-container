@@ -5,9 +5,6 @@ let
   bin = lib.getExe cfg.package;
   runAs = "sudo -u ${cfg.user} --";
 
-  stateDir = "/var/lib/nix-apple-container";
-  kernelIdentity = "${cfg.kernel.package}:${cfg.kernel.binaryPath}";
-  kernelIdentityFile = "${stateDir}/kernel-identity";
   userHome = if config.users.users ? ${cfg.user} then
     config.users.users.${cfg.user}.home
   else
@@ -216,18 +213,11 @@ in {
         "nix2container images to load. Each value must be a nix2container buildImage output with copyTo, imageName, and imageTag attributes.";
     };
 
-    kernel = {
-      package = lib.mkOption {
-        type = lib.types.package;
-        default = pkgs.callPackage ./kernel.nix { };
-        description =
-          "Kata kernel tarball (passed to container system kernel set --tar).";
-      };
-      binaryPath = lib.mkOption {
-        type = lib.types.str;
-        default = "opt/kata/share/kata-containers/vmlinux-6.18.5-177";
-        description = "Path to the kernel binary within the tar archive.";
-      };
+    kernel = lib.mkOption {
+      type = lib.types.package;
+      default = pkgs.callPackage ./kernel.nix { };
+      description =
+        "Kernel binary (flat file derivation). The default extracts the kata-containers kernel. The store path is symlinked directly as default.kernel-arm64.";
     };
 
     linuxBuilder = {
@@ -250,6 +240,20 @@ in {
       };
     };
 
+    preserveImagesOnDisable = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description =
+        "Keep loaded images when the module is disabled. By default, teardown removes all runtime state.";
+    };
+
+    preserveVolumesOnDisable = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description =
+        "Keep runtime-managed volume data when the module is disabled. By default, teardown removes all runtime state. Does not affect bind-mounted volumes (those are always preserved).";
+    };
+
   };
 
   config = lib.mkMerge [
@@ -267,8 +271,18 @@ in {
 
           ${runAs} ${bin} system stop 2>/dev/null || true
 
-          # All state is safe to remove — the runtime rebuilds it on next enable
-          rm -rf "$APP_SUPPORT"
+          # Kernels and temp staging are always safe to remove
+          rm -rf "$APP_SUPPORT/kernels"
+          rm -rf "$APP_SUPPORT/content/ingest"
+
+          ${lib.optionalString (!cfg.preserveImagesOnDisable) ''
+            rm -rf "$APP_SUPPORT/content"
+          ''}
+
+          ${lib.optionalString
+          (!cfg.preserveImagesOnDisable && !cfg.preserveVolumesOnDisable) ''
+            rm -rf "$APP_SUPPORT"
+          ''}
 
           ${runAs} defaults delete com.apple.container 2>/dev/null || true
 
@@ -278,7 +292,6 @@ in {
 
         # These run regardless of APP_SUPPORT existence
         rm -f /etc/nix/builder_ed25519 /etc/nix/builder_ed25519.pub
-        rm -rf "${stateDir}"
       '';
     })
 
@@ -314,22 +327,13 @@ in {
       system.activationScripts.preActivation.text = lib.mkAfter
         (lib.concatStrings [
           ''
-            mkdir -p "${stateDir}"
             if ! ${runAs} ${bin} system status &>/dev/null; then
               echo "nix-apple-container: starting runtime..."
               ${runAs} ${bin} system start --disable-kernel-install
             fi
-            KERNEL_DIR="${userHome}/Library/Application Support/com.apple.container/kernels"
-            KERNEL_ID="${kernelIdentity}"
-            if [ ! -d "$KERNEL_DIR" ] || [ -z "$(ls -A "$KERNEL_DIR" 2>/dev/null)" ] || \
-               [ "$(cat "${kernelIdentityFile}" 2>/dev/null)" != "$KERNEL_ID" ]; then
-              echo "nix-apple-container: installing kernel..."
-              ${runAs} ${bin} system kernel set \
-                --tar ${cfg.kernel.package} \
-                --binary ${cfg.kernel.binaryPath} \
-                --force
-              echo "$KERNEL_ID" > "${kernelIdentityFile}"
-            fi
+            KERNEL_DIR="${appSupport}/kernels"
+            ${runAs} mkdir -p "$KERNEL_DIR"
+            ${runAs} ln -sf "${cfg.kernel}" "$KERNEL_DIR/default.kernel-arm64"
           ''
           imageLoadScript
           mkMountDirsScript

@@ -125,16 +125,25 @@ services.containerization = {
 };
 ```
 
-### Custom kernel version
+### Custom kernel
+
+Override `kernel` with a flat file derivation containing the kernel binary:
 
 ```nix
 services.containerization = {
   enable = true;
-  kernel.package = pkgs.fetchurl {
-    url = "https://github.com/kata-containers/kata-containers/releases/download/3.26.0/kata-static-3.26.0-arm64.tar.zst";
-    hash = "sha256-g89Z0G72ZWUzj3jrR8NKSIXY15MSF4ZQ77Wyza01eSI=";
+  kernel = pkgs.stdenv.mkDerivation {
+    pname = "my-kernel";
+    version = "3.26.0";
+    outputHash = "sha256-...";
+    outputHashMode = "flat";
+    nativeBuildInputs = with pkgs; [ cacert curl zstd gnutar ];
+    buildCommand = ''
+      curl -L -o kata.tar.zst "https://github.com/kata-containers/kata-containers/releases/download/3.26.0/kata-static-3.26.0-arm64.tar.zst"
+      tar --zstd -xf kata.tar.zst ./opt/kata/share/kata-containers/
+      cp -L ./opt/kata/share/kata-containers/vmlinux.container $out
+    '';
   };
-  kernel.binaryPath = "opt/kata/share/kata-containers/vmlinux-6.18.5-177";
 };
 ```
 
@@ -210,10 +219,9 @@ Set `enable = false` and rebuild. The module will:
 
 1. Unload all container launchd agents
 2. Stop the container runtime
-3. Remove all runtime state (`~/Library/Application Support/com.apple.container/`)
+3. Remove runtime state (`~/Library/Application Support/com.apple.container/`) — respects `preserveImagesOnDisable` and `preserveVolumesOnDisable`
 4. Remove builder SSH key (`/etc/nix/builder_ed25519*`) if present
-5. Remove module state (`/var/lib/nix-apple-container`)
-6. Clear user preference defaults and `.pkg` install receipts
+5. Clear user preference defaults and `.pkg` install receipts
 
 If you remove the module import entirely (instead of `enable = false`), no cleanup runs. Keep the import with `enable = false` first, rebuild, then remove the import. If you find any lingering artifacts please open an issue.
 

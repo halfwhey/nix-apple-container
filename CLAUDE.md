@@ -38,12 +38,11 @@ The module uses:
 ### Activation (enable = true)
 
 `preActivation`:
-1. Creates module state directory (`/var/lib/nix-apple-container`)
-2. `container system status` — check if runtime is running; only start if not (fails loudly on error, no `|| true`)
-3. Kernel identity tracking — installs kernel if kernels dir is empty OR if `${kernelIdentity}` marker differs from stored value. This ensures kernel changes in config are applied (not just first-time install). Marker stored at `/var/lib/nix-apple-container/kernel-identity`.
-4. Image loading — for each image in `images.*`, checks if it's already present via `container image ls`, and loads it via `container image load -i` if missing. Must happen before launchd starts containers.
-5. Creates mount directories for containers with `autoCreateMounts = true` (only for absolute host paths)
-6. Prunes stopped containers (`container prune`)
+1. `container system status` — check if runtime is running; only start if not (fails loudly on error, no `|| true`)
+2. Kernel symlink — creates `$APP_SUPPORT/kernels/default.kernel-arm64` as a symlink to the kernel binary in the Nix store. Fully declarative — the store path changes when the config changes, updating the symlink on next rebuild.
+3. Image loading — for each image in `images.*`, checks if it's already present via `container image ls`, and loads it via `container image load -i` if missing. Must happen before launchd starts containers.
+4. Creates mount directories for containers with `autoCreateMounts = true` (only for absolute host paths)
+5. Prunes stopped containers (`container prune`)
 
 `postActivation`:
 1. Unloads stale launchd agents (`dev.apple.container.*.plist`) not in current config
@@ -69,11 +68,12 @@ Guarded by `if [ -d "$APP_SUPPORT" ]` — only runs if container state exists (p
 When disabled:
 1. Unloads all module-owned launchd agents (`dev.apple.container.*.plist`) — runs before system stop to prevent KeepAlive restart loops
 2. `container system stop` — deregisters launchd services, stops containers
-3. Removes entire `$APP_SUPPORT` directory (the runtime rebuilds it on next enable)
-4. `defaults delete com.apple.container`
-5. `pkgutil --forget com.apple.container-installer` (if receipt exists)
-6. Removes builder files (`/etc/nix/builder_ed25519*`) if present
-7. Removes module state directory (`/var/lib/nix-apple-container`)
+3. Always removes `kernels/` and `content/ingest/` (safe to recreate)
+4. If `preserveImagesOnDisable = false` (default): removes `content/` (image blobs + metadata)
+5. If both preserve options are false (default): removes entire `$APP_SUPPORT` directory
+6. `defaults delete com.apple.container`
+7. `pkgutil --forget com.apple.container-installer` (if receipt exists)
+8. Removes builder files (`/etc/nix/builder_ed25519*`) if present
 
 ### Linux builder (linuxBuilder.enable = true)
 
@@ -121,13 +121,13 @@ Every feature that creates state outside the Nix store MUST clean it up when dis
 
 | Component | State created | Cleanup when disabled |
 |-----------|--------------|----------------------|
-| Module (`enable`) | `~/Library/Application Support/com.apple.container/`, defaults, pkg receipt, `/var/lib/nix-apple-container/` | Teardown block with `!cfg.enable` guard; also removes builder files |
+| Module (`enable`) | `~/Library/Application Support/com.apple.container/`, defaults, pkg receipt | Teardown block with `!cfg.enable` guard; selective cleanup based on `preserveImagesOnDisable` and `preserveVolumesOnDisable`; also removes builder files |
 | Containers (`autoStart`) | Launchd agents (`dev.apple.container.*.plist`), running container VMs | postActivation reconciliation unloads agents + stops/removes containers; teardown also unloads agents before system stop |
 | Linux builder (`linuxBuilder.enable`) | `/etc/nix/builder_ed25519*`, `programs.ssh.extraConfig`, `nix.buildMachines` (declarative), `determinateNix.customSettings` (Determinate) | `!cfg.linuxBuilder.enable` block removes SSH key; declarative options cleared by nix-darwin |
-| Kernel | `/var/lib/nix-apple-container/kernel-identity` marker | Marker removed with state dir on `!cfg.enable` |
-| Images (`images.*`) | Images loaded into runtime's own storage via `container image load` | Runtime storage removed with `$APP_SUPPORT` on `!cfg.enable` |
+| Kernel | Symlinks in `$APP_SUPPORT/kernels/` pointing to Nix store | Removed with kernels dir on teardown (always cleaned); binary in Nix store protected by system profile |
+| Images (`images.*`) | Images loaded into runtime's own storage via `container image load` | Removed with `content/` unless `preserveImagesOnDisable = true` |
 | Mount directories (`autoCreateMounts`) | Host directories for volumes (absolute paths only) | NOT cleaned up (user data, intentionally preserved) |
-| Unnamed volumes | Runtime-managed storage inside `$APP_SUPPORT` (volumes without a host path) | Destroyed with `$APP_SUPPORT` on `!cfg.enable` — a build-time warning is emitted |
+| Unnamed volumes | Runtime-managed storage inside `$APP_SUPPORT` (volumes without a host path) | Destroyed with `$APP_SUPPORT` unless `preserveVolumesOnDisable = true` — a build-time warning is emitted |
 
 ### nix-darwin's `userLaunchd` limitation
 
@@ -158,10 +158,7 @@ Running `container system start` as a persistent `KeepAlive = true` daemon cause
 `darwin-rebuild switch` runs as root. `container image pull` stores data under `$HOME/Library/Application Support/com.apple.container/`. When run as root, this becomes `/var/root/Library/...` — the wrong location. The container runtime running as the actual user can't find the images. Error: `NSCocoaErrorDomain Code=4 ... couldn't be moved to "sha256"`. Fixed by wrapping all container CLI calls with `sudo -u <user> --`.
 
 ### Kernel install prompt
-`container system start` prompts interactively: "Install the recommended default kernel from [URL]? [Y/n]:". This hangs non-interactive environments. The `--enable-kernel-install` flag auto-accepts, but `container system kernel set --recommended` is more explicit. The module now uses `--disable-kernel-install` on `system start` and handles the kernel separately with a check-then-install pattern.
-
-### Kernel re-installation on every rebuild
-`container system kernel set --recommended` ran unconditionally, re-downloading ~277MB on every rebuild. Fixed two ways: (1) kernel is now a Nix derivation (`kernel.nix`) installed via `--tar <nix-store-path>` — no network download; (2) only runs if `kernels/` directory is empty.
+`container system start` prompts interactively: "Install the recommended default kernel from [URL]? [Y/n]:". This hangs non-interactive environments. The module uses `--disable-kernel-install` on `system start` and manages the kernel declaratively — `kernel.nix` extracts the binary into the Nix store, and the activation script symlinks it into the runtime's `kernels/` directory.
 
 ## Apple Containerization quirks
 
@@ -169,7 +166,7 @@ Running `container system start` as a persistent `KeepAlive = true` daemon cause
 Unlike Docker (single VM hosting all containers), each container runs in its own lightweight VM with a dedicated Linux kernel. The framework provides the kernel (kata-containers) and a Swift-based init system (vminitd) as PID 1.
 
 ### Kernel source
-The Linux kernel comes from [kata-containers](https://github.com/kata-containers/kata-containers/releases). The specific file extracted is `opt/kata/share/kata-containers/vmlinux-*` from the release tarball. Installed to `~/Library/Application Support/com.apple.container/kernels/` with a `default.kernel-arm64` symlink.
+The Linux kernel comes from [kata-containers](https://github.com/kata-containers/kata-containers/releases). `kernel.nix` is a fixed-output derivation that fetches the release tarball, extracts the kernel binary via the `vmlinux.container` symlink, and stores just the binary (~16MB) in the Nix store. The activation script symlinks it into `~/Library/Application Support/com.apple.container/kernels/` with a `default.kernel-arm64` symlink.
 
 ### Networking
 - macOS 15: limited networking, no container-to-container, no custom networks
@@ -225,7 +222,7 @@ nix-darwin has no "on module removed" lifecycle hook. Cleanup happens via:
 
 ### Kata Containers (kernel)
 - Releases: https://github.com/kata-containers/kata-containers/releases
-- Kernel binary path in tarball: `opt/kata/share/kata-containers/vmlinux-*`
+- Kernel binary in tarball: `opt/kata/share/kata-containers/vmlinux.container` (symlink to versioned binary)
 
 ### nix-darwin
 - Repository: https://github.com/LnL7/nix-darwin
