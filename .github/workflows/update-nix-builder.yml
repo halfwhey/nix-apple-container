@@ -1,0 +1,44 @@
+name: Update nix-builder base image
+
+on:
+  schedule:
+    - cron: '0 8 * * 1'
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get versions
+        id: versions
+        run: |
+          CURRENT=$(sed -n 's/^FROM nixos\/nix:\(.*\)/\1/p' builder/Dockerfile)
+          LATEST=$(curl -s "https://hub.docker.com/v2/repositories/nixos/nix/tags?page_size=100" \
+            | jq -r '.results[].name' \
+            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V | tail -1)
+          echo "current=$CURRENT" >> $GITHUB_OUTPUT
+          echo "latest=$LATEST" >> $GITHUB_OUTPUT
+
+      - name: Already up to date
+        if: steps.versions.outputs.current == steps.versions.outputs.latest
+        run: echo "nixos/nix is already up to date (${{ steps.versions.outputs.current }})"
+
+      - name: Update Dockerfile
+        if: steps.versions.outputs.current != steps.versions.outputs.latest
+        run: |
+          sed -i 's|^FROM nixos/nix:.*|FROM nixos/nix:${{ steps.versions.outputs.latest }}|' builder/Dockerfile
+
+      - name: Commit and push
+        if: steps.versions.outputs.current != steps.versions.outputs.latest
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add builder/Dockerfile
+          git commit -m "chore: bump nix-builder to ${{ steps.versions.outputs.latest }}"
+          git push origin master

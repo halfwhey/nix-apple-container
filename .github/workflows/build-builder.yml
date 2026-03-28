@@ -14,11 +14,15 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Get Nix version
+        id: nix-version
+        run: echo "version=$(sed -n 's/^FROM nixos\/nix:\(.*\)/\1/p' builder/Dockerfile)" >> $GITHUB_OUTPUT
 
       - uses: docker/setup-qemu-action@v3
 
@@ -37,4 +41,10 @@ jobs:
           push: true
           tags: |
             ${{ env.IMAGE }}:latest
-            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:${{ steps.nix-version.outputs.version }}
+
+      - name: Bump linuxBuilder default image
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          make bump-default
