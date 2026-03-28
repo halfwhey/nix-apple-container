@@ -1,5 +1,5 @@
 {
-  description = "nix-darwin module for Apple Containerization";
+  description = "nix-darwin module for Apple Containerization (v0.0.2)";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
