@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  eval-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        nix-variant: [vanilla, determinate]
+    runs-on: [self-hosted, macOS, ARM64, tart, "${{ matrix.nix-variant }}"]
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Eval tests
+        run: nix flake check ./dev --all-systems
+
+      - name: Build container CLI
+        run: nix build .#packages.aarch64-darwin.default
+
+      - name: Build kernel
+        run: nix build .#packages.aarch64-darwin.kernel
+
+      - name: Apply integration config
+        run: sudo darwin-rebuild switch --flake ./dev#ci-integration
+
+      - name: Wait for containers to start
+        run: sleep 10
+
+      - name: Run integration tests
+        run: bash tests/integration/run-integration.sh
