@@ -12,6 +12,12 @@ variable "base_image" {
   default = "ghcr.io/cirruslabs/macos-sequoia-base:latest"
 }
 
+variable "nix_serve_host" {
+  type        = string
+  default     = ""
+  description = "Host:port of a local nix-serve for faster builds (e.g. 192.168.67.1:5000)"
+}
+
 source "tart-cli" "determinate" {
   vm_base_name = var.base_image
   vm_name      = "macos-determinate"
@@ -28,17 +34,21 @@ build {
 
   provisioner "shell" {
     script = "scripts/install-determinate-nix.sh"
+    environment_vars = [
+      "NIX_SERVE_HOST=${var.nix_serve_host}",
+    ]
   }
 
   provisioner "shell" {
     script = "scripts/install-nix-darwin.sh"
   }
 
-  # Shrink the image before pushing
+  # Shrink the image before saving
   provisioner "shell" {
     inline = [
+      "export PATH=/run/current-system/sw/bin:/usr/local/bin:/nix/var/nix/profiles/default/bin:$HOME/.nix-profile/bin:$PATH",
       "sudo rm -rf /Library/Caches/*",
-      "sudo rm -rf ~/Library/Caches/*",
+      "rm -rf ~/Library/Caches/*",
       "nix store gc",
     ]
   }
