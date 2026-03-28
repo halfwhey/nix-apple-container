@@ -117,6 +117,56 @@ Two image sources:
 
 The user's home directory is resolved at Nix eval time via `userHome` (checks `config.users.users` first, falls back to `/Users/${cfg.user}`).
 
+### Projects (composition layer)
+
+Projects group related containers with shared configuration. A container `web` in project `myapp` becomes `myapp-web` in `cfg.containers`. This is implemented via a `lib.mkMerge` block that expands `cfg.projects` into `cfg.containers` at module evaluation time.
+
+Project expansion logic:
+- Container names: `<project>-<name>` (e.g., `myapp-web`)
+- `dependsOn`: within a project, short names (`db`) auto-resolve to scoped names (`myapp-db`). Cross-project or top-level refs use the full name.
+- `env` and `labels`: project-level values merge with container-level (container takes precedence via `//`)
+- `network`: project network applies to all containers unless overridden at container level
+- Project networks: if `project.network` is set and not in `cfg.networks`, auto-created via `services.containerization.networks`
+
+Collision detection: assertions verify no name clash between top-level `containers.*` and expanded project containers.
+
+### Declarative networks and volumes
+
+Networks and volumes are created idempotently in `preActivation` (after runtime start, before image loading).
+
+- **Networks**: `container network create --label managed-by=nix-apple-container`. Idempotency guard: skip if `container network inspect` succeeds. Reconciled in `postActivation`: stale networks with the `managed-by` label are removed. Also cleaned up in teardown (`!cfg.enable`).
+- **Volumes**: `container volume create --label managed-by=nix-apple-container`. Created in `preActivation`. Not reconciled (removing volumes loses data).
+
+### Service dependencies (dependsOn)
+
+Implemented via polling in `mkContainerRunScript`. Before `exec container run`, the wrapper loops for each dependency:
+1. `container inspect "$dep"` → check if `.status == "running"` via jq
+2. Sleep 1s, repeat up to `dependsOnTimeout` (default 60s)
+3. If timeout, emit warning and proceed anyway (container may still start)
+
+This works with launchd's `KeepAlive = true` — if a dependency restarts, the dependent container also restarts (launchd) and re-polls.
+
+Validation assertions:
+- All `dependsOn` targets must exist in `cfg.containers`
+- All targets must have `autoStart = true`
+- No cycles (DFS-based detection)
+
+### NixOS containers
+
+NixOS containers are built via nix2container, adapted from Arion's pattern:
+
+1. **Evaluation**: `import "${pkgs.path}/nixos/lib/eval-config.nix"` with `system = "aarch64-linux"` and user's `nixos.configuration` modules + `apple-container-base.nix`
+2. **Init symlink**: `runCommand` creates `/usr/sbin/init → system.build.toplevel/init` (Arion's pattern — nix2container includes the full closure in image layers)
+3. **Image build**: `nix2container.buildImage` with `copyToRoot = rootInit`, `entrypoint = ["/usr/sbin/init"]`, `maxLayers = 100`
+4. **Auto-registration**: built images are merged into `cfg.images` so the existing `imageLoadScript` handles loading
+5. **Auto-config**: container `image` is auto-set, cgroup mount and `/run` tmpfs are auto-added for systemd
+
+**VM architecture**: vminitd runs at the VM level (not inside the container). The container's entrypoint IS PID 1 from the container's perspective. systemd runs successfully as PID 1 inside Apple containers.
+
+**Dependencies**: Requires `nix2containerLib` module arg (passed from flake.nix). Building aarch64-linux packages requires the Linux builder (rebuild twice pattern).
+
+**Base module** (`modules/nixos/apple-container-base.nix`): imports `minimal.nix` profile, sets `boot.isContainer = true`, disables logind/getty/nix-daemon, routes journald to console.
+
 ## Idempotency and cleanup principles
 
 Every activation script and feature MUST follow these rules:
@@ -141,6 +191,9 @@ Every feature that creates state outside the Nix store MUST clean it up when dis
 | Images (`images.*`) | Images loaded into runtime's own storage via `container image load` | Removed with `content/` unless `preserveImagesOnDisable = true` |
 | Mount directories (`autoCreateMounts`) | Host directories for volumes (absolute paths only) | NOT cleaned up (user data, intentionally preserved) |
 | Named volumes | Runtime-managed storage inside `$APP_SUPPORT` | Destroyed with `$APP_SUPPORT` unless `preserveVolumesOnDisable = true` |
+| Networks (`networks.*`) | Container networks created via `container network create` | Reconciled in postActivation (stale managed networks removed); teardown removes all managed networks |
+| Declarative volumes (`volumes.*`) | Named volumes created via `container volume create` | Created but not reconciled (data preservation); destroyed with `$APP_SUPPORT` on teardown |
+| NixOS container images | OCI images built from NixOS configs via nix2container | Same as `images.*` — removed with `content/` unless `preserveImagesOnDisable = true` |
 
 ### nix-darwin's `userLaunchd` limitation
 

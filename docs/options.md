@@ -11,6 +11,19 @@
 | `preserveImagesOnDisable` | bool | `false` | Keep loaded images when the module is disabled |
 | `preserveVolumesOnDisable` | bool | `false` | Keep named volume data when the module is disabled. Best-effort based on known runtime directory layout. Bind mounts are always preserved (they live on the host) |
 
+## `services.containerization.networks.<name>`
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `subnet` | string or null | `null` | IPv4 subnet (e.g. `192.168.100.0/24`) |
+| `subnetV6` | string or null | `null` | IPv6 subnet |
+
+Declarative networks (macOS 26+). Created idempotently during activation. Networks managed by the module are labeled `managed-by=nix-apple-container` and cleaned up when removed from config or when the module is disabled.
+
+## `services.containerization.volumes.<name>`
+
+Declarative named volumes. Created idempotently during activation.
+
 ## `services.containerization.kernel`
 
 | Option | Type | Default | Description |
@@ -21,7 +34,9 @@
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `image` | string | *required* | Image name:tag (from `images.*` or a registry — the runtime pulls automatically) |
+| `image` | string or null | `null` | Image name:tag (from `images.*` or a registry). Auto-set when `nixos.enable = true`. Required otherwise |
+| `nixos.enable` | bool | `false` | Build this container from a NixOS configuration. Requires nix2container flake input |
+| `nixos.configuration` | NixOS module | `{}` | NixOS modules to evaluate and build into an OCI image. The image runs systemd as PID 1 |
 | `autoStart` | bool | `false` | Run via launchd user agent on login. When false, the name is reserved (prevents drift cleanup) but no container is created |
 | `cmd` | list of strings | `[]` | Override the image CMD |
 | `env` | attrs of strings | `{}` | Environment variables |
@@ -32,10 +47,28 @@
 | `workdir` | string or null | `null` | Override working directory |
 | `init` | bool | `false` | Run init for signal forwarding and zombie reaping |
 | `ssh` | bool | `false` | Forward SSH agent from host |
-| `network` | string or null | `null` | Attach to custom network (macOS 26+). The module does not create or manage networks — use `container network` commands manually |
+| `network` | string or null | `null` | Attach to custom network (macOS 26+). Can reference a network from `networks.*` or a project network |
 | `readOnly` | bool | `false` | Read-only root filesystem |
 | `labels` | attrs of strings | `{}` | Container labels for metadata |
-| `extraArgs` | list of strings | `[]` | Extra arguments passed to `container run` (e.g. `--publish`, `--cpus`, `--memory`) |
+| `ports` | list of strings | `[]` | Port mappings (`host:container`). Each becomes a `--publish` flag |
+| `cpus` | float or null | `null` | CPU limit for the container VM |
+| `memory` | string or null | `null` | Memory limit (e.g. `512m`, `2g`) |
+| `dependsOn` | list of strings | `[]` | Container names that must be running before this one starts. Within a project, use short names (auto-resolved to scoped names) |
+| `dependsOnTimeout` | int | `60` | Seconds to wait for each dependency before proceeding |
+| `dns` | list of strings | `[]` | Custom DNS servers |
+| `tmpfs` | list of strings | `[]` | Tmpfs mounts inside the container |
+| `extraArgs` | list of strings | `[]` | Extra arguments passed to `container run` |
+
+## `services.containerization.projects.<name>`
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `containers` | attrs of container submodule | `{}` | Containers in this project. Names are scoped: `web` in project `myapp` becomes `myapp-web` |
+| `network` | string or null | `null` | Shared network for all containers (macOS 26+). Auto-created if not in `networks.*` |
+| `env` | attrs of strings | `{}` | Environment variables applied to all containers in the project |
+| `labels` | attrs of strings | `{}` | Labels applied to all containers in the project |
+
+Projects group related containers with shared configuration. Container names are scoped by project (`<project>-<name>`). Within a project, `dependsOn` references use short names and auto-resolve to the scoped form. Project-level `env` and `labels` merge into each container (container-level values take precedence).
 
 ## `services.containerization.linuxBuilder`
 

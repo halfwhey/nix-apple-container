@@ -18,8 +18,12 @@ A nix-darwin module for declaratively managing [Apple Containerization][apple-co
 - Manages the Kata Linux kernel as a Nix derivation (no runtime download from GitHub)
 - Starts the container runtime and installs the kernel automatically
 - Declares containers that run as launchd user agents (automatically recreated on config change)
+- **Projects**: group related containers with shared networks, environment, labels, and service dependencies — like docker-compose, but declarative Nix
+- **NixOS containers**: pass a NixOS configuration and the module evaluates it, builds an OCI image via [nix2container][nix2container], and runs it with systemd as PID 1
+- **Service dependencies**: `dependsOn` polls until upstream containers are running before starting
+- **Declarative networks and volumes**: created and reconciled automatically (macOS 26+)
 - Containers are addressable by name from the host and from other containers (e.g. `foo.test` for a container named `foo`)
-- Auto-creates host directories for volume mounts
+- Resource limits (`cpus`, `memory`), port publishing (`ports`), DNS, tmpfs as first-class options
 - Optional Linux builder container for building `aarch64-linux` derivations on macOS
 - Reconciles running containers against config — removes undeclared containers and their launchd agents
 - Builds and loads Nix-built OCI images via [nix2container][nix2container] — no tarballs in the Nix store
@@ -77,7 +81,7 @@ Import the module in your darwin host config:
     containers.web = {
       image = "nginx:alpine";
       autoStart = true;
-      extraArgs = [ "--publish" "8080:80" ];
+      ports = [ "8080:80" ];
     };
   };
 }
@@ -105,7 +109,7 @@ services.containerization = {
   containers.nginx = {
     image = "nginx:alpine";
     autoStart = true;
-    extraArgs = [ "--publish" "8080:80" ];
+    ports = [ "8080:80" ];
   };
 };
 ```
@@ -118,13 +122,89 @@ services.containerization = {
   containers.gitea = {
     image = "gitea/gitea:latest";
     autoStart = true;
-    volumes = [
-      "/Users/me/.gitea/data:/data"
-    ];
-    extraArgs = [
-      "--publish" "3000:3000"
-      "--publish" "2222:22"
-    ];
+    ports = [ "3000:3000" "2222:22" ];
+    volumes = [ "/Users/me/.gitea/data:/data" ];
+  };
+};
+```
+
+### Project with service dependencies (docker-compose style)
+
+Group related containers into a project. Containers share a network and can reference each other by name (e.g. `myapp-db.test`). `dependsOn` ensures containers start in order.
+
+```nix
+services.containerization = {
+  enable = true;
+
+  projects.myapp = {
+    network = "myapp";  # macOS 26+ — auto-created
+    env = { LOG_LEVEL = "info"; };
+
+    containers.db = {
+      image = "postgres:16";
+      autoStart = true;
+      env = { POSTGRES_PASSWORD = "dev"; };
+      volumes = [ "pgdata:/var/lib/postgresql/data" ];
+    };
+
+    containers.api = {
+      image = "my-api:latest";
+      autoStart = true;
+      ports = [ "3000:3000" ];
+      dependsOn = [ "db" ];  # waits for myapp-db to be running
+      env = { DATABASE_URL = "postgres://myapp-db.test:5432/app"; };
+    };
+
+    containers.web = {
+      image = "nginx:alpine";
+      autoStart = true;
+      ports = [ "8080:80" ];
+      dependsOn = [ "api" ];
+    };
+  };
+};
+```
+
+Container names are scoped by project: `db` becomes `myapp-db`, `api` becomes `myapp-api`. Within a project, `dependsOn` uses short names and auto-resolves.
+
+### NixOS container
+
+Define a container by passing a NixOS configuration. The module evaluates it, builds an OCI image via nix2container, and runs it with systemd as PID 1.
+
+```nix
+services.containerization = {
+  enable = true;
+  linuxBuilder.enable = true;  # needed to build aarch64-linux packages
+
+  containers.web = {
+    nixos = {
+      enable = true;
+      configuration = {
+        services.nginx = {
+          enable = true;
+          virtualHosts.default.root = "/var/www";
+        };
+        networking.firewall.allowedTCPPorts = [ 80 ];
+      };
+    };
+    autoStart = true;
+    ports = [ "8080:80" ];
+  };
+};
+```
+
+> **Note**: NixOS containers require the `nix2container` flake input (included by default in this flake). Building the image requires `aarch64-linux` packages — enable `linuxBuilder` and rebuild twice.
+
+### Resource limits
+
+```nix
+services.containerization = {
+  enable = true;
+  containers.worker = {
+    image = "my-worker:latest";
+    autoStart = true;
+    cpus = 2.0;
+    memory = "4g";
   };
 };
 ```
@@ -205,7 +285,7 @@ in {
     containers.greeter = {
       image = "greeter:latest";
       autoStart = true;
-      extraArgs = [ "--publish" "8080:8080" ];
+      ports = [ "8080:8080" ];
     };
   };
 }
@@ -213,7 +293,7 @@ in {
 
 Test it with `curl http://localhost:8080` after rebuild.
 
-Images are loaded into the runtime via `container image load` at activation time. The load is idempotent — images already present are skipped.
+Images are loaded into the runtime via `container image load` at activation time. The load is content-aware — each image's manifest digest is compared against the runtime, and only images with changed content are reloaded.
 
 > **Note**: Building nix2container images requires `aarch64-linux` packages. Enable `linuxBuilder` and rebuild twice: the first starts the builder, the second builds and loads the image.
 
