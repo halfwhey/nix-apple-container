@@ -1,8 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
-echo "==> Installing vanilla Nix (multi-user)..."
-curl -L https://nixos.org/nix/install | sh -s -- --daemon --yes
+NIX_VERSION="${NIX_VERSION:-2.33.3}"
+
+echo "==> Installing vanilla Nix ${NIX_VERSION} (multi-user)..."
+curl -L "https://releases.nixos.org/nix/nix-${NIX_VERSION}/install" | sh -s -- --daemon --yes
 
 # Explicit PATH (packer SSH sessions don't reload shell profiles)
 export PATH="/nix/var/nix/profiles/default/bin:$HOME/.nix-profile/bin:$PATH"
