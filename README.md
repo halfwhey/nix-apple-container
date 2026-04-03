@@ -268,6 +268,12 @@ To check for active tunnel interfaces:
 ifconfig | grep utun
 ```
 
+### Headless Mac: permission popups block container startup
+
+On headless Mac minis (or any Mac without a display), macOS may present GUI permission dialogs for network or volume access the first time a container starts. These popups are invisible over SSH and will silently block the container from launching.
+
+Connect a display (or use screen sharing) and approve the permission prompts. Once granted, the permissions persist across reboots.
+
 [apple-containerization]: https://github.com/apple/containerization
 [nix-darwin]: https://github.com/LnL7/nix-darwin
 [nix2container]: https://github.com/nlewo/nix2container
