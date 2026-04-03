@@ -348,6 +348,22 @@ in {
       system.activationScripts.preActivation.text = lib.mkAfter
         (lib.concatStrings [
           ''
+            # If the apiserver is registered but its binary no longer exists (e.g.
+            # package upgrade + nix-collect-garbage), launchd can't activate it and
+            # every CLI command hangs.  Deregister the stale service so system start
+            # can re-register with the current binary.
+            CONTAINER_UID=$(id -u "${cfg.user}" 2>/dev/null || echo "")
+            if [ -n "$CONTAINER_UID" ]; then
+              APISERVER_BIN=$(launchctl asuser "$CONTAINER_UID" sudo --user="${cfg.user}" -- \
+                launchctl print "user/$CONTAINER_UID/com.apple.container.apiserver" 2>/dev/null \
+                | grep "path = " | awk '{print $3}') || true
+              if [ -n "$APISERVER_BIN" ] && [ ! -x "$APISERVER_BIN" ]; then
+                echo "nix-apple-container: deregistering stale apiserver ($APISERVER_BIN)..."
+                launchctl asuser "$CONTAINER_UID" sudo --user="${cfg.user}" -- \
+                  launchctl bootout "user/$CONTAINER_UID/com.apple.container.apiserver" 2>/dev/null || true
+              fi
+            fi
+
             if ! ${runAs} ${bin} system status &>/dev/null; then
               echo "nix-apple-container: starting runtime..."
               ${runAs} ${bin} system start --disable-kernel-install
