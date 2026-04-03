@@ -1,6 +1,6 @@
 { lib, stdenv, fetchurl, xar, cpio
-, version ? "0.10.0"
-, hash ? "sha256-xIHONVUk0DbDzdrH/SgeMXlNQGkL+aIfcy7z12+p/gg="
+, version ? "0.11.0"
+, hash ? "sha256-kGNqRgOmaeurQZuuHh2dMijAFWxJAiY8ksGdBQMPQEo="
 }:
 
 stdenv.mkDerivation {
