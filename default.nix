@@ -246,7 +246,7 @@ in {
         lib.mkEnableOption "Linux builder container for aarch64-linux builds";
       image = lib.mkOption {
         type = lib.types.str;
-        default = "ghcr.io/halfwhey/nix-builder:2.34.5";
+        default = "ghcr.io/halfwhey/nix-builder:2.34.6";
         description = "Docker image for the Nix remote builder.";
       };
       sshPort = lib.mkOption {
