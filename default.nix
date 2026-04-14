@@ -204,6 +204,17 @@ let
       exec ${lib.escapeShellArgs args}
     '';
 
+  ensureResolverScript = ''
+    mkdir -p /etc/resolver
+
+    printf '%s\n' \
+      'domain test' \
+      'search test' \
+      'nameserver 127.0.0.1' \
+      'port 2053' \
+      > /etc/resolver/containerization.test
+  '';
+
 in {
   options.services.containerization = {
     enable = lib.mkEnableOption "Apple Containerization framework";
@@ -327,10 +338,12 @@ in {
         fi
 
         # These run regardless of APP_SUPPORT existence
+        ${runAs} ${bin} system property clear dns.domain 2>/dev/null || true
         ${runAs} defaults delete com.apple.container 2>/dev/null || true
         pkgutil --pkg-info com.apple.container-installer &>/dev/null && \
           sudo pkgutil --forget com.apple.container-installer 2>/dev/null || true
         rm -f /etc/nix/builder_ed25519 /etc/nix/builder_ed25519.pub
+        rm -f /etc/resolver/containerization.test
       '';
     })
 
@@ -388,6 +401,10 @@ in {
               echo "nix-apple-container: starting runtime..."
               ${runAs} ${bin} system start --disable-kernel-install
             fi
+            if [ "$(${runAs} ${bin} system property get dns.domain 2>/dev/null || true)" != "test" ]; then
+              echo "nix-apple-container: setting default DNS domain to test..."
+              ${runAs} ${bin} system property set dns.domain test
+            fi
             KERNEL_DIR="${appSupport}/kernels"
             ${runAs} mkdir -p "$KERNEL_DIR"
             ${runAs} ln -sf "${cfg.kernel}" "$KERNEL_DIR/default.kernel-arm64"
@@ -430,6 +447,9 @@ in {
             ${runAs} ${bin} rm "$cid" 2>/dev/null || true
           fi
         done
+
+        echo "nix-apple-container: ensuring host resolver for .test..."
+        ${ensureResolverScript}
       '');
     })
 
