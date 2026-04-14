@@ -20,7 +20,7 @@ A nix-darwin module for declaratively managing [Apple Containerization][apple-co
 - Declares containers that run as launchd user agents (automatically recreated on config change)
 - Containers are addressable by name from the host and from other containers (e.g. `foo.test` for a container named `foo`)
 - Auto-creates host directories for volume mounts
-- Optional Linux builder container for building `aarch64-linux` derivations on macOS
+- Optional Linux builder containers for building `aarch64-linux` and `x86_64-linux` derivations on macOS
 - Reconciles running containers against config — removes undeclared containers and their launchd agents
 - Builds and loads Nix-built OCI images via [nix2container][nix2container] — no tarballs in the Nix store
 
@@ -87,7 +87,7 @@ After `darwin-rebuild switch`, the container runtime starts, the image is pulled
 
 ## Options
 
-See [docs/options.md][options] for the full option reference — `services.containerization`, containers, kernel, images, and linuxBuilder.
+See [docs/options.md][options] for the full option reference — `services.containerization`, containers, kernel, images, and linux-builder.
 
 ## Examples
 
@@ -191,7 +191,7 @@ let
 in {
   services.containerization = {
     enable = true;
-    linuxBuilder.enable = true;  # needed to build aarch64-linux derivations
+    linux-builder.aarch64.enable = true;  # needed to build aarch64-linux derivations
 
     images.greeter = nix2container.buildImage {
       name = "greeter";
@@ -215,7 +215,23 @@ Test it with `curl http://localhost:8080` after rebuild.
 
 Images are loaded into the runtime via `container image load` at activation time. The load is idempotent — images already present are skipped.
 
-> **Note**: Building nix2container images requires `aarch64-linux` packages. Enable `linuxBuilder` and rebuild twice: the first starts the builder, the second builds and loads the image.
+> **Note**: Building nix2container images requires `aarch64-linux` packages. Enable `linux-builder.aarch64` and rebuild twice: the first starts the builder, the second builds and loads the image.
+
+### Cross-architecture Linux builds
+
+Build `x86_64-linux` and `aarch64-linux` derivations on Apple Silicon:
+
+```nix
+services.containerization = {
+  enable = true;
+  linux-builder = {
+    aarch64.enable = true;  # aarch64-linux builder
+    x86_64.enable = true;   # x86_64-linux builder 
+  };
+};
+```
+
+Each architecture runs its own builder container. Both share the same multi-arch image and SSH key. The x86_64 builder listens on port 31023 by default (configurable via `linux-builder.x86_64.sshPort`).
 
 ### Registry images
 

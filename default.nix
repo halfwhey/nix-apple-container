@@ -5,6 +5,112 @@ let
   bin = lib.getExe cfg.package;
   runAs = "sudo -u ${cfg.user} --";
 
+  builderCfg = cfg."linux-builder";
+  anyBuilderEnabled =
+    builderCfg.aarch64.enable || builderCfg.x86_64.enable;
+
+  # Builder architecture definitions — only platform and defaults differ
+  builderArches = {
+    aarch64 = {
+      nixSystems = [ "aarch64-linux" ];
+      platform = null;
+      defaultPort = 31022;
+    };
+    x86_64 = {
+      nixSystems = [ "x86_64-linux" ];
+      platform = "linux/amd64";
+      defaultPort = 31023;
+    };
+  };
+
+  mkBuilderArchOptions = _arch:
+    { defaultPort, ... }: {
+      enable = lib.mkEnableOption "Linux builder container";
+      sshPort = lib.mkOption {
+        type = lib.types.port;
+        default = defaultPort;
+        description = "Host port for SSH to the builder container.";
+      };
+      maxJobs = lib.mkOption {
+        type = lib.types.int;
+        default = 4;
+        description = "Maximum number of parallel build jobs on the builder.";
+      };
+      speedFactor = lib.mkOption {
+        type = lib.types.int;
+        default = 1;
+        description = ''
+          Relative speed of the builder.
+          Arbitrary integer for Nix scheduler prioritization.
+        '';
+      };
+      cores = lib.mkOption {
+        type = lib.types.int;
+        default = 4;
+        description = "Number of CPUs to allocate to the builder container.";
+      };
+      memory = lib.mkOption {
+        type = lib.types.str;
+        default = "1024M";
+        description = "Amount of memory to allocate to the builder container.";
+      };
+    };
+
+  # Generate per-arch config blocks (container, SSH, buildMachines)
+  mkBuilderArchConfig = arch:
+    { nixSystems, platform, ... }:
+    let
+      archCfg = builderCfg.${arch};
+      name = "nix-builder-${arch}";
+      platformArgs =
+        lib.optionals (platform != null) [ "--platform" platform ];
+    in [
+      # Container and SSH config
+      (lib.mkIf (cfg.enable && archCfg.enable) {
+        services.containerization.containers.${name} = {
+          image = builderCfg.image;
+          autoStart = true;
+          extraArgs = platformArgs ++ [
+            "--publish"
+            "${toString archCfg.sshPort}:22"
+            "--cpus"
+            "${toString archCfg.cores}"
+            "--memory"
+            "${toString archCfg.memory}"
+          ];
+        };
+
+        # SSH alias for buildMachines (which has no port field).
+        # StrictHostKeyChecking=no because the builder generates a new
+        # host key on every container restart.
+        programs.ssh.extraConfig = ''
+          Host ${name}
+            HostName localhost
+            Port ${toString archCfg.sshPort}
+            User root
+            IdentityFile /etc/nix/builder_ed25519
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+        '';
+      })
+
+      # Declarative Nix config (plain nix-darwin)
+      (lib.mkIf (cfg.enable && archCfg.enable && config.nix.enable) {
+        nix.buildMachines = [{
+          hostName = name;
+          protocol = "ssh-ng";
+          sshUser = "root";
+          sshKey = "/etc/nix/builder_ed25519";
+          systems = nixSystems;
+          maxJobs = archCfg.maxJobs;
+          speedFactor = archCfg.speedFactor;
+          supportedFeatures = [ "big-parallel" ];
+        }];
+        nix.distributedBuilds = lib.mkDefault true;
+        nix.settings.builders-use-substitutes = lib.mkDefault true;
+      })
+    ];
+
   userHome = if config.users.users ? ${cfg.user} then
     config.users.users.${cfg.user}.home
   else
@@ -216,6 +322,31 @@ let
   '';
 
 in {
+  imports = [
+    # Backward compat: linuxBuilder.* → linux-builder.aarch64.* / linux-builder.image
+    (lib.mkRenamedOptionModule
+      [ "services" "containerization" "linuxBuilder" "enable" ]
+      [ "services" "containerization" "linux-builder" "aarch64" "enable" ])
+    (lib.mkRenamedOptionModule
+      [ "services" "containerization" "linuxBuilder" "image" ]
+      [ "services" "containerization" "linux-builder" "image" ])
+    (lib.mkRenamedOptionModule
+      [ "services" "containerization" "linuxBuilder" "sshPort" ]
+      [ "services" "containerization" "linux-builder" "aarch64" "sshPort" ])
+    (lib.mkRenamedOptionModule
+      [ "services" "containerization" "linuxBuilder" "maxJobs" ]
+      [ "services" "containerization" "linux-builder" "aarch64" "maxJobs" ])
+    (lib.mkRenamedOptionModule
+      [ "services" "containerization" "linuxBuilder" "speedFactor" ]
+      [ "services" "containerization" "linux-builder" "aarch64" "speedFactor" ])
+    (lib.mkRenamedOptionModule
+      [ "services" "containerization" "linuxBuilder" "cores" ]
+      [ "services" "containerization" "linux-builder" "aarch64" "cores" ])
+    (lib.mkRenamedOptionModule
+      [ "services" "containerization" "linuxBuilder" "memory" ]
+      [ "services" "containerization" "linux-builder" "aarch64" "memory" ])
+  ];
+
   options.services.containerization = {
     enable = lib.mkEnableOption "Apple Containerization framework";
 
@@ -252,45 +383,14 @@ in {
         "Kernel binary (flat file derivation). The default extracts the kata-containers kernel. The store path is symlinked directly as default.kernel-arm64.";
     };
 
-    linuxBuilder = {
-      enable =
-        lib.mkEnableOption "Linux builder container for aarch64-linux builds";
+    "linux-builder" = {
       image = lib.mkOption {
         type = lib.types.str;
         default = "ghcr.io/halfwhey/nix-builder:2.34.6";
-        description = "Docker image for the Nix remote builder.";
+        description =
+          "Docker image for the Nix remote builder (multi-arch, shared across architectures).";
       };
-      speedFactor = lib.mkOption {
-        type = lib.types.int;
-        default = 1;
-        description = ''
-          The relative speed of the Linux builder.
-          This is an arbitrary integer that indicates the speed of this builder, relative to other.
-        '';
-      };
-      cores = lib.mkOption {
-        type = lib.types.int;
-        default = 4;
-        description = "Number of CPUs to allocate to the container.";
-      };
-      memory = lib.mkOption {
-        type = lib.types.str;
-        default = "1024M";
-        description = ''
-          Amount of memory to allocate to the container.
-        '';
-      };
-      sshPort = lib.mkOption {
-        type = lib.types.port;
-        default = 31022;
-        description = "Host port for SSH to the builder container.";
-      };
-      maxJobs = lib.mkOption {
-        type = lib.types.int;
-        default = 4;
-        description = "Maximum number of parallel build jobs on the builder.";
-      };
-    };
+    } // lib.mapAttrs mkBuilderArchOptions builderArches;
 
     preserveImagesOnDisable = lib.mkOption {
       type = lib.types.bool;
@@ -308,7 +408,7 @@ in {
 
   };
 
-  config = lib.mkMerge [
+  config = lib.mkMerge ([
     # Teardown: runs when module is disabled (guarded — only if state exists)
     (lib.mkIf (!cfg.enable) {
       system.activationScripts.postActivation.text = lib.mkAfter ''
@@ -453,8 +553,8 @@ in {
       '');
     })
 
-    # Linux builder cleanup (module enabled but builder disabled)
-    (lib.mkIf (cfg.enable && !cfg.linuxBuilder.enable) {
+    # Linux builder cleanup (module enabled but no builders active)
+    (lib.mkIf (cfg.enable && !anyBuilderEnabled) {
       system.activationScripts.postActivation.text = lib.mkAfter ''
         if [ -f /etc/nix/builder_ed25519 ]; then
           echo "nix-apple-container: removing linux builder resources..."
@@ -463,21 +563,8 @@ in {
       '';
     })
 
-    # Linux builder — container, SSH key, and SSH config (all backends)
-    (lib.mkIf (cfg.enable && cfg.linuxBuilder.enable) {
-      services.containerization.containers.nix-builder = {
-        image = cfg.linuxBuilder.image;
-        autoStart = true;
-        extraArgs = [
-          "--publish"
-          "${toString cfg.linuxBuilder.sshPort}:22"
-          "--cpus"
-          "${toString cfg.linuxBuilder.cores}"
-          "--memory"
-          "${toString cfg.linuxBuilder.memory}"
-        ];
-      };
-
+    # Linux builder — shared SSH key (all backends, any arch)
+    (lib.mkIf (cfg.enable && anyBuilderEnabled) {
       # SSH key must be imperative — SSH requires 0600, can't use a world-readable store path
       system.activationScripts.preActivation.text = lib.mkAfter ''
         if ! cmp -s ${./builder/builder_ed25519} /etc/nix/builder_ed25519 2>/dev/null; then
@@ -487,53 +574,40 @@ in {
           } /etc/nix/builder_ed25519.pub
         fi
       '';
-
-      # SSH config for builder alias (port mapping + host key skipping).
-      # nix.buildMachines has no port field, so we use hostName=nix-builder as an
-      # SSH alias. StrictHostKeyChecking=no is needed because the builder generates
-      # a new host key on every container restart.
-      programs.ssh.extraConfig = ''
-        Host nix-builder
-          HostName localhost
-          Port ${toString cfg.linuxBuilder.sshPort}
-          User root
-          IdentityFile /etc/nix/builder_ed25519
-          StrictHostKeyChecking no
-          UserKnownHostsFile /dev/null
-      '';
-
     })
 
-    # Linux builder — declarative Nix config (plain nix-darwin with nix.enable = true)
-    (lib.mkIf (cfg.enable && cfg.linuxBuilder.enable && config.nix.enable) {
-      nix.buildMachines = [{
-        hostName = "nix-builder";
-        protocol = "ssh-ng";
-        sshUser = "root";
-        sshKey = "/etc/nix/builder_ed25519";
-        systems = [ "aarch64-linux" ];
-        maxJobs = cfg.linuxBuilder.maxJobs;
-        speedFactor = cfg.linuxBuilder.speedFactor;
-        supportedFeatures = [ "big-parallel" ];
+    # Port conflict assertion (both builders enabled)
+    (lib.mkIf (cfg.enable && builderCfg.aarch64.enable
+      && builderCfg.x86_64.enable) {
+      assertions = [{
+        assertion =
+          builderCfg.aarch64.sshPort != builderCfg.x86_64.sshPort;
+        message =
+          "nix-apple-container: linux-builder.aarch64.sshPort and linux-builder.x86_64.sshPort must be different.";
       }];
-      nix.distributedBuilds = lib.mkDefault true;
-      nix.settings.builders-use-substitutes = lib.mkDefault true;
     })
 
     # Linux builder — Determinate Nix config (nix.enable = false, determinateNix module available)
-    (lib.mkIf (cfg.enable && cfg.linuxBuilder.enable && !config.nix.enable)
+    (lib.mkIf (cfg.enable && anyBuilderEnabled && !config.nix.enable)
       (if options ? determinateNix then {
         determinateNix.customSettings = {
-          builders =
-            "ssh-ng://nix-builder aarch64-linux /etc/nix/builder_ed25519 ${
-              toString cfg.linuxBuilder.maxJobs
-            } 1 big-parallel - -";
+          builders = lib.concatStringsSep "\\n"
+            (lib.concatLists (lib.mapAttrsToList (arch:
+              { nixSystems, ... }:
+              let archCfg = builderCfg.${arch};
+              in lib.optional archCfg.enable
+                "ssh-ng://nix-builder-${arch} ${
+                  builtins.head nixSystems
+                } /etc/nix/builder_ed25519 ${
+                  toString archCfg.maxJobs
+                } ${toString archCfg.speedFactor} big-parallel - -")
+              builderArches));
           builders-use-substitutes = true;
         };
       } else {
         warnings = [
-          "nix-apple-container: linuxBuilder.enable is true but neither nix.enable nor the determinateNix module is available. Builder Nix config (buildMachines, distributedBuilds) must be managed manually."
+          "nix-apple-container: linux-builder is enabled but neither nix.enable nor the determinateNix module is available. Builder Nix config (buildMachines, distributedBuilds) must be managed manually."
         ];
       }))
-  ];
+  ] ++ lib.concatLists (lib.mapAttrsToList mkBuilderArchConfig builderArches));
 }

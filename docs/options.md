@@ -37,23 +37,17 @@
 | `labels` | attrs of strings | `{}` | Container labels for metadata |
 | `extraArgs` | list of strings | `[]` | Extra arguments passed to `container run` (e.g. `--publish`, `--cpus`, `--memory`) |
 
-## `services.containerization.linuxBuilder`
+## `services.containerization.linux-builder`
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `enable` | bool | `false` | Run a Nix builder container for aarch64-linux builds |
-| `image` | string | `"ghcr.io/halfwhey/nix-builder:latest"` | Builder container image |
-| `cores` | int | `4` | Number of CPUs to allocate to the container |
-| `memory` | string | `"1024M"` | Amount of memory to allocate to the container |
-| `sshPort` | port | `31022` | Host port for SSH to the builder |
-| `maxJobs` | int | `4` | Max parallel build jobs |
-| `speedFactor` | int | `1` | Relative speed of the builder (arbitrary integer for Nix scheduler prioritization) |
+| `image` | string | `"ghcr.io/halfwhey/nix-builder:<version>"` | Builder container image (multi-arch, shared by aarch64 and x86_64) |
 
-Runs a Nix builder container for aarch64-linux builds. The default image (`ghcr.io/halfwhey/nix-builder`) is built from the `builder/Dockerfile` in this repo — it's a minimal `nixos/nix` image with sshd. Uses a known SSH key pair (builder only listens on localhost, same security model as nixpkgs' `darwin.linux-builder`).
+The default image (`ghcr.io/halfwhey/nix-builder`) is built from the `builder/Dockerfile` in this repo -- a minimal `nixos/nix` image with sshd. Uses a known SSH key pair (builder only listens on localhost, same security model as nixpkgs' `darwin.linux-builder`).
 
 Builder Nix configuration is fully declarative:
 - **`nix.enable = true`** (plain nix-darwin): uses `nix.buildMachines`, `nix.distributedBuilds`, and `nix.settings`.
-- **Determinate Nix**: uses `determinateNix.customSettings`. Note: `builders` is a single string setting — if another module also sets `determinateNix.customSettings.builders`, they will conflict. Requires the [Determinate nix-darwin module](https://docs.determinate.systems/guides/nix-darwin/):
+- **Determinate Nix**: uses `determinateNix.customSettings`. Note: `builders` is a single string setting -- if another module also sets `determinateNix.customSettings.builders`, they will conflict. Requires the [Determinate nix-darwin module](https://docs.determinate.systems/guides/nix-darwin/):
 
   <details>
   <summary>Determinate Nix flake setup</summary>
@@ -88,3 +82,29 @@ Builder Nix configuration is fully declarative:
   </details>
 
 **Bootstrap**: First rebuild starts the builder. Second rebuild can use it for Linux derivations (e.g. nix2container images with `aarch64-linux` packages).
+
+> **Migration**: The old `linuxBuilder.*` option names still work but emit a deprecation warning. Update to `linux-builder.aarch64.*` (per-arch options) and `linux-builder.image` (shared image).
+
+## `services.containerization.linux-builder.aarch64`
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enable` | bool | `false` | Run a Nix builder container for aarch64-linux builds |
+| `cores` | int | `4` | Number of CPUs to allocate to the container |
+| `memory` | string | `"1024M"` | Amount of memory to allocate to the container |
+| `sshPort` | port | `31022` | Host port for SSH to the builder |
+| `maxJobs` | int | `4` | Max parallel build jobs |
+| `speedFactor` | int | `1` | Relative speed of the builder (arbitrary integer for Nix scheduler prioritization) |
+
+## `services.containerization.linux-builder.x86_64`
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enable` | bool | `false` | Run a builder container for x86_64-linux builds |
+| `cores` | int | `4` | Number of CPUs to allocate to the x86_64 builder container |
+| `memory` | string | `"1024M"` | Amount of memory to allocate to the x86_64 builder container |
+| `sshPort` | port | `31023` | Host port for SSH to the x86_64 builder |
+| `maxJobs` | int | `4` | Max parallel build jobs |
+| `speedFactor` | int | `1` | Relative speed of the x86_64 builder |
+
+Both builders share the same image and SSH key. The x86_64 builder runs with `--platform linux/amd64`. Performance is lower than native aarch64 builds but enables building `x86_64-linux` derivations without a separate x86 machine.

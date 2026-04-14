@@ -93,20 +93,31 @@ When disabled:
 7. `pkgutil --forget com.apple.container-installer` (if receipt exists) — runs unconditionally
 8. Removes builder files (`/etc/nix/builder_ed25519*`) — runs unconditionally
 
-### Linux builder (linuxBuilder.enable = true)
+### Linux builders (linux-builder.aarch64 / linux-builder.x86_64)
 
-Runs `ghcr.io/halfwhey/nix-builder` (based on `nixos/nix`) as an Apple container with sshd, configured as a Nix remote builder for aarch64-linux builds. Uses a known SSH key pair committed to the repo (same security model as nixpkgs' `darwin.linux-builder` — builder only listens on localhost).
+Runs `ghcr.io/halfwhey/nix-builder` (based on `nixos/nix`) as Apple containers with sshd, configured as Nix remote builders. Two architectures available: `linux-builder.aarch64` (native) and `linux-builder.x86_64` (`--platform linux/amd64`). Each is independently enabled. Both share the same multi-arch image (`linux-builder.image`) and SSH key pair committed to the repo (same security model as nixpkgs' `darwin.linux-builder` -- builder only listens on localhost).
 
-The default image tag in `default.nix` (`services.containerization.linuxBuilder.image`) tracks the Nix version used in the Dockerfile (e.g. `2.34.3`), not `:latest`. It is bumped automatically by `build-builder.yml` after each successful image push. The auto-update cascade is handled by a single `build-builder.yml` run: detects a newer `nixos/nix` tag → updates `builder/Dockerfile`, builds and pushes image tagged `:<nix-version>`, updates `default.nix` → commits all changes in one commit.
+Container names always include the platform: `nix-builder-aarch64`, `nix-builder-x86_64`. SSH aliases match the container names.
 
-Users can override the image via `services.containerization.linuxBuilder.image = "ghcr.io/halfwhey/nix-builder:2.34.3"`.
+The old `linuxBuilder.*` option names are deprecated but still work via `mkRenamedOptionModule` (7 entries in `imports`). They map to `linux-builder.aarch64.*` (per-arch options) and `linux-builder.image` (shared).
+
+The default image tag in `default.nix` (`services.containerization.linux-builder.image`) tracks the Nix version used in the Dockerfile (e.g. `2.34.3`), not `:latest`. It is bumped automatically by `build-builder.yml` after each successful image push. The CI regex (`s|ghcr.io/halfwhey/nix-builder:[^"]*|...|`) matches the string literal in the option default value.
+
+Users can override the image via `services.containerization.linux-builder.image = "ghcr.io/halfwhey/nix-builder:2.34.3"`.
+
+Implementation structure in `default.nix`:
+- `builderCfg = cfg."linux-builder"` and `anyBuilderEnabled` helpers in the `let` block
+- Shared block (SSH key install): `lib.mkIf (cfg.enable && anyBuilderEnabled)`
+- Per-arch blocks (container, SSH config, `nix.buildMachines`): `lib.mkIf (cfg.enable && builderCfg.<arch>.enable)`
+- Port conflict assertion: `lib.mkIf` both enabled, asserts ports differ
+- Determinate Nix `builders` is a scalar string, so both lines are conditionally built via `lib.optional` inside one block using `lib.concatStringsSep "\\n"`
 
 Builder config uses backend-specific declarative options when possible:
 - When `config.nix.enable = true` (plain nix-darwin): sets `nix.buildMachines`, `nix.distributedBuilds`, `nix.settings.builders-use-substitutes` declaratively. nix-darwin writes the files and handles daemon restarts.
 - When `config.nix.enable = false` (Determinate Nix): sets `determinateNix.customSettings` declaratively.
-- In all backends: SSH key (`/etc/nix/builder_ed25519`) is installed imperatively (needs 0600 perms). SSH config uses `programs.ssh.extraConfig` declaratively. SSH config is needed because `nix.buildMachines` has no port field (we use `hostName = "nix-builder"` as an SSH alias) and `StrictHostKeyChecking no` is required (builder generates a new host key on every restart).
+- In all backends: SSH key (`/etc/nix/builder_ed25519`) is installed imperatively (needs 0600 perms). SSH config uses `programs.ssh.extraConfig` declaratively. SSH config is needed because `nix.buildMachines` has no port field (we use `hostName = "nix-builder-<arch>"` as SSH aliases) and `StrictHostKeyChecking no` is required (builder generates a new host key on every restart).
 
-When disabled: removes `/etc/nix/builder_ed25519*`. Container is removed by reconciliation. Declarative `nix.buildMachines`, `programs.ssh.extraConfig`, and `determinateNix.customSettings` are cleared automatically by nix-darwin when the `lib.mkIf` condition becomes false.
+When all builders disabled: removes `/etc/nix/builder_ed25519*`. Containers removed by reconciliation. Declarative `nix.buildMachines`, `programs.ssh.extraConfig`, and `determinateNix.customSettings` are cleared automatically by nix-darwin when `lib.mkIf` conditions become false.
 
 ### Images
 
@@ -145,7 +156,7 @@ Every feature that creates state outside the Nix store MUST clean it up when dis
 |-----------|--------------|----------------------|
 | Module (`enable`) | `~/Library/Application Support/com.apple.container/`, defaults, pkg receipt | Teardown block with `!cfg.enable` guard; selective cleanup based on `preserveImagesOnDisable` and `preserveVolumesOnDisable`; also removes builder files |
 | Containers (`autoStart`) | Launchd agents (`dev.apple.container.*.plist`), running container VMs | postActivation reconciliation unloads agents + stops/removes containers; teardown also unloads agents before system stop |
-| Linux builder (`linuxBuilder.enable`) | `/etc/nix/builder_ed25519*`, `programs.ssh.extraConfig`, `nix.buildMachines` (declarative), `determinateNix.customSettings` (Determinate) | `!cfg.linuxBuilder.enable` block removes SSH key; declarative options cleared by nix-darwin |
+| Linux builders (`linux-builder.{aarch64,x86_64}.enable`) | `/etc/nix/builder_ed25519*`, `programs.ssh.extraConfig`, `nix.buildMachines` (declarative), `determinateNix.customSettings` (Determinate), containers `nix-builder-{aarch64,x86_64}` | `!anyBuilderEnabled` block removes SSH key; containers removed by reconciliation; declarative options cleared by nix-darwin |
 | Kernel | Symlinks in `$APP_SUPPORT/kernels/` pointing to Nix store | Removed with kernels dir on teardown (always cleaned); binary in Nix store protected by system profile |
 | Images (`images.*`) | Images loaded into runtime's own storage via `container image load` | Removed with `content/` unless `preserveImagesOnDisable = true` |
 | Mount directories (`autoCreateMounts`) | Host directories for volumes (absolute paths only) | NOT cleaned up (user data, intentionally preserved) |
