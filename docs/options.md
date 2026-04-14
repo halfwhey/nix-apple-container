@@ -43,8 +43,11 @@
 |--------|------|---------|-------------|
 | `enable` | bool | `false` | Run a Nix builder container for aarch64-linux builds |
 | `image` | string | `"ghcr.io/halfwhey/nix-builder:latest"` | Builder container image |
+| `cores` | int | `4` | Number of CPUs to allocate to the container |
+| `memory` | string | `"1024M"` | Amount of memory to allocate to the container |
 | `sshPort` | port | `31022` | Host port for SSH to the builder |
 | `maxJobs` | int | `4` | Max parallel build jobs |
+| `speedFactor` | int | `1` | Relative speed of the builder (arbitrary integer for Nix scheduler prioritization) |
 
 Runs a Nix builder container for aarch64-linux builds. The default image (`ghcr.io/halfwhey/nix-builder`) is built from the `builder/Dockerfile` in this repo — it's a minimal `nixos/nix` image with sshd. Uses a known SSH key pair (builder only listens on localhost, same security model as nixpkgs' `darwin.linux-builder`).
 
