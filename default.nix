@@ -249,6 +249,26 @@ in {
         default = "ghcr.io/halfwhey/nix-builder:2.34.6";
         description = "Docker image for the Nix remote builder.";
       };
+      speedFactor = lib.mkOption {
+        type = lib.types.int;
+        default = 1;
+        description = ''
+          The relative speed of the Linux builder.
+          This is an arbitrary integer that indicates the speed of this builder, relative to other.
+        '';
+      };
+      cores = lib.mkOption {
+        type = lib.types.int;
+        default = 4;
+        description = "Number of CPUs to allocate to the container.";
+      };
+      memory = lib.mkOption {
+        type = lib.types.str;
+        default = "1024M";
+        description = ''
+          Amount of memory to allocate to the container.
+        '';
+      };
       sshPort = lib.mkOption {
         type = lib.types.port;
         default = 31022;
@@ -428,7 +448,14 @@ in {
       services.containerization.containers.nix-builder = {
         image = cfg.linuxBuilder.image;
         autoStart = true;
-        extraArgs = [ "--publish" "${toString cfg.linuxBuilder.sshPort}:22" ];
+        extraArgs = [
+          "--publish"
+          "${toString cfg.linuxBuilder.sshPort}:22"
+          "--cpus"
+          "${toString cfg.linuxBuilder.cores}"
+          "--memory"
+          "${toString cfg.linuxBuilder.memory}"
+        ];
       };
 
       # SSH key must be imperative — SSH requires 0600, can't use a world-readable store path
@@ -461,12 +488,12 @@ in {
     (lib.mkIf (cfg.enable && cfg.linuxBuilder.enable && config.nix.enable) {
       nix.buildMachines = [{
         hostName = "nix-builder";
-        protocol = "ssh";
+        protocol = "ssh-ng";
         sshUser = "root";
         sshKey = "/etc/nix/builder_ed25519";
         systems = [ "aarch64-linux" ];
         maxJobs = cfg.linuxBuilder.maxJobs;
-        speedFactor = 1;
+        speedFactor = cfg.linuxBuilder.speedFactor;
         supportedFeatures = [ "big-parallel" ];
       }];
       nix.distributedBuilds = lib.mkDefault true;
@@ -478,7 +505,7 @@ in {
       (if options ? determinateNix then {
         determinateNix.customSettings = {
           builders =
-            "ssh://nix-builder aarch64-linux /etc/nix/builder_ed25519 ${
+            "ssh-ng://nix-builder aarch64-linux /etc/nix/builder_ed25519 ${
               toString cfg.linuxBuilder.maxJobs
             } 1 big-parallel - -";
           builders-use-substitutes = true;
