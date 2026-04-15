@@ -12,6 +12,7 @@ experimental-features = nix-command flakes
 max-jobs = auto
 cores = 0
 sandbox = false
+filter-syscalls = false
 trusted-users = root
 EOF
 
