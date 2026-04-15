@@ -21,7 +21,6 @@ A nix-darwin module for declaratively managing [Apple Containerization][apple-co
 - Containers are addressable by name from the host and from other containers (e.g. `foo.test` for a container named `foo`)
 - Auto-creates host directories for volume mounts
 - Optional Linux builder containers for building `aarch64-linux` and `x86_64-linux` derivations on macOS
-- Uses a dedicated Rosetta-compatible kernel for the `x86_64` builder by default
 - Reconciles running containers against config — removes undeclared containers and their launchd agents
 - Builds and loads Nix-built OCI images via [nix2container][nix2container] — no tarballs in the Nix store
 

@@ -1,6 +1,11 @@
-{ lib, stdenv, fetchurl, xar, cpio
-, version ? "0.11.0"
-, hash ? "sha256-kGNqRgOmaeurQZuuHh2dMijAFWxJAiY8ksGdBQMPQEo="
+{
+  lib,
+  stdenv,
+  fetchurl,
+  xar,
+  cpio,
+  version ? "0.11.0",
+  hash ? "sha256-kGNqRgOmaeurQZuuHh2dMijAFWxJAiY8ksGdBQMPQEo=",
 }:
 
 stdenv.mkDerivation {
@@ -8,12 +13,14 @@ stdenv.mkDerivation {
   inherit version;
 
   src = fetchurl {
-    url =
-      "https://github.com/apple/container/releases/download/${version}/container-${version}-installer-signed.pkg";
+    url = "https://github.com/apple/container/releases/download/${version}/container-${version}-installer-signed.pkg";
     inherit hash;
   };
 
-  nativeBuildInputs = [ xar cpio ];
+  nativeBuildInputs = [
+    xar
+    cpio
+  ];
 
   dontConfigure = true;
   dontBuild = true;
