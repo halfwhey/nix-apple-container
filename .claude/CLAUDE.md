@@ -16,17 +16,19 @@ done
 
 This is a nix-darwin module that wraps Apple's [Containerization](https://github.com/apple/containerization) framework.
 
-- `default.nix` — the nix-darwin module
-- `package.nix` — derivation that extracts the `container` CLI from Apple's signed `.pkg`; accepts overridable `version` and `hash` args
-- `kernel.nix` — fixed-output derivation that fetches the kata-containers kernel tarball via `curl` and extracts the binary; accepts overridable `version` and `hash` args
+- `module/default.nix` — nix-darwin module entrypoint; runtime/container lifecycle
+- `module/options.nix` — core module options and the container submodule definition
+- `module/builders.nix` — linux-builder options, compatibility shims, and builder config
+- `pkgs/package.nix` — derivation that extracts the `container` CLI from Apple's signed `.pkg`; accepts overridable `version` and `hash` args
+- `pkgs/kernel.nix` — fixed-output derivation that fetches the kata-containers kernel tarball via `curl` and extracts the binary; accepts overridable `version` and `hash` args
 - `builder/Dockerfile` — nix-builder image (`FROM nixos/nix:<version>`)
 - `builder/IMAGE_VERSION` — builder image version series; published tags use `<builder-version>-nix<nix-version>` (e.g. `v2-nix2.34.6`)
 - `builder/builder_ed25519` / `builder/builder_ed25519.pub` — known SSH key pair for the linux builder (intentionally public, same model as nixpkgs' `darwin.linux-builder`)
 - `Makefile` — build/push/release/update targets for the builder image and module
 - `scripts/` — update scripts: `update-container.sh`, `update-kernel.sh`, `update-nix-builder.sh`
 - `scripts/uninstall.sh` — standalone uninstall script; mirrors the module teardown logic for use when the module import has been removed
-- `.github/workflows/build-builder.yml` — weekly scheduled workflow (and push trigger on `builder/**`); on schedule, checks Docker Hub for a newer `nixos/nix` tag and, if stale, updates `builder/Dockerfile`, builds and pushes the image, updates `default.nix`, and commits both files in a single commit; on push/dispatch, builds and pushes the image and commits only the `default.nix` change
-- `.github/workflows/update-container.yml` — weekly scheduled workflow; checks GitHub releases for a newer `apple/container` tag and bumps `package.nix` if stale
+- `.github/workflows/build-builder.yml` — weekly scheduled workflow (and push trigger on `builder/**`); on schedule, checks Docker Hub for a newer `nixos/nix` tag and, if stale, updates `builder/Dockerfile`, builds and pushes the image, updates `module/builders.nix`, and commits both files in a single commit; on push/dispatch, builds and pushes the image and commits only the `module/builders.nix` change
+- `.github/workflows/update-container.yml` — weekly scheduled workflow; checks GitHub releases for a newer `apple/container` tag and bumps `pkgs/package.nix` if stale
 
 The flake exposes `darwinModules.default`, `packages.aarch64-darwin.default`, `packages.aarch64-darwin.kernel`, and `packages.aarch64-darwin.uninstall`.
 
@@ -102,19 +104,16 @@ Container names always include a URI-safe platform suffix: `nix-builder-aarch64`
 
 The builder image must persist both `sandbox = false` and `filter-syscalls = false` in `/etc/nix/nix.conf`. Setting `filter-syscalls = false` only on one-off image build commands is not enough — remote builds can still fail during environment setup with `unable to load seccomp BPF program: Invalid argument`, especially on the amd64/Rosetta path.
 
-The old `linuxBuilder.*` option names are deprecated but still work via `mkRenamedOptionModule` (7 entries in `imports`). They map to `linux-builder.aarch64.*` (per-arch options) and `linux-builder.image` (shared).
+The old `linuxBuilder.*` option names are deprecated but still work via `mkRenamedOptionModule` (7 entries in `module/builders.nix`). They map to `linux-builder.aarch64.*` (per-arch options) and `linux-builder.image` (shared).
 
-The default image tag in `default.nix` (`services.containerization.linux-builder.image`) uses `<builder-version>-nix<nix-version>` (e.g. `v2-nix2.34.6`), not `:latest`. `builder/IMAGE_VERSION` is bumped manually when the builder image semantics change; the nix-version suffix is bumped automatically by `build-builder.yml` when the `nixos/nix` base image changes. The CI regex (`s|ghcr.io/halfwhey/nix-builder:[^"]*|...|`) matches the string literal in the option default value.
+The default image tag in `module/builders.nix` (`services.containerization.linux-builder.image`) uses `<builder-version>-nix<nix-version>` (e.g. `v2-nix2.34.6`), not `:latest`. `builder/IMAGE_VERSION` is bumped manually when the builder image semantics change; the nix-version suffix is bumped automatically by `build-builder.yml` when the `nixos/nix` base image changes. The CI regex (`s|ghcr.io/halfwhey/nix-builder:[^"]*|...|`) matches the string literal in the option default value.
 
 Users can override the image via `services.containerization.linux-builder.image = "ghcr.io/halfwhey/nix-builder:v2-nix2.34.6"`.
 
-Implementation structure in `default.nix`:
-- `builderCfg = cfg."linux-builder"` and `anyBuilderEnabled` helpers in the `let` block
-- `defaultKernel` (runtime default) and `rosettaCompatKernel` (x86_64 builder-only) helpers in the `let` block
-- Shared block (SSH key install): `lib.mkIf (cfg.enable && anyBuilderEnabled)`
-- Per-arch blocks (container, SSH config, `nix.buildMachines`): `lib.mkIf (cfg.enable && builderCfg.<arch>.enable)`
-- Port conflict assertion: `lib.mkIf` both enabled, asserts ports differ
-- Determinate Nix uses `determinateNix.buildMachines` directly, mirroring the plain `nix.buildMachines` data instead of hand-serializing `builders`
+Implementation structure across `module/`:
+- `module/default.nix`: runtime start/teardown, image loading, launchd jobs, container reconciliation
+- `module/options.nix`: core `services.containerization` options and the container submodule
+- `module/builders.nix`: `builderCfg`/`anyBuilderEnabled`, per-arch builder options/config, SSH key setup, and Determinate/plain Nix builder wiring
 
 Builder config uses backend-specific declarative options when possible:
 - When `config.nix.enable = true` (plain nix-darwin): sets `nix.buildMachines`, `nix.distributedBuilds`, `nix.settings.builders-use-substitutes` declaratively. nix-darwin writes the files and handles daemon restarts.
@@ -206,10 +205,10 @@ On headless Mac minis (no display, no logged-in console session), the `gui/<uid>
 ### Stale apiserver launchd registration hangs all CLI commands
 If the `container` CLI was previously run from a different install path (e.g., a source build in `.build/debug/`, or a Nix store path that was later garbage collected), launchd retains the apiserver registration pointing to the old binary. Every `container` command — including `--help`, `system status`, `system stop` — hangs indefinitely at "checking if APIServer is alive" because XPC blocks waiting for launchd to activate a binary that doesn't exist (launchd enters exponential throttle). Manual fix: `launchctl bootout user/$(id -u)/com.apple.container.apiserver`. See [#1329](https://github.com/apple/container/issues/1329).
 
-The module handles this automatically in preActivation: before checking `system status`, it inspects the registered apiserver binary path via `launchctl print`. If the binary no longer exists (stale store path), it bootouts the service so `system start` can re-register with the current binary. This makes package upgrades (version bumps in `package.nix`) safe — the old store path is deregistered before the new CLI tries to use it.
+The module handles this automatically in preActivation: before checking `system status`, it inspects the registered apiserver binary path via `launchctl print`. If the binary no longer exists (stale store path), it bootouts the service so `system start` can re-register with the current binary. This makes package upgrades (version bumps in `pkgs/package.nix`) safe — the old store path is deregistered before the new CLI tries to use it.
 
 ### Kernel install prompt
-`container system start` prompts interactively: "Install the recommended default kernel from [URL]? [Y/n]:". This hangs non-interactive environments. The module uses `--disable-kernel-install` on `system start` and manages the runtime default kernel declaratively — `kernel.nix` extracts the binary into the Nix store, and the activation script symlinks it into the runtime's `kernels/` directory. Individual containers can still override this with `container run --kernel`; the x86_64 Nix builder uses that hook to pin a Rosetta-compatible kernel.
+`container system start` prompts interactively: "Install the recommended default kernel from [URL]? [Y/n]:". This hangs non-interactive environments. The module uses `--disable-kernel-install` on `system start` and manages the runtime default kernel declaratively — `pkgs/kernel.nix` extracts the binary into the Nix store, and the activation script symlinks it into the runtime's `kernels/` directory. Individual containers can still override this with `container run --kernel`; the x86_64 Nix builder uses that hook to pin a Rosetta-compatible kernel.
 
 ## Apple Containerization quirks
 
@@ -217,9 +216,9 @@ The module handles this automatically in preActivation: before checking `system 
 Unlike Docker (single VM hosting all containers), each container runs in its own lightweight VM with a dedicated Linux kernel. The framework provides the kernel (kata-containers) and a Swift-based init system (vminitd) as PID 1.
 
 ### Kernel source
-The Linux kernel comes from [kata-containers](https://github.com/kata-containers/kata-containers/releases). `kernel.nix` is a fixed-output `stdenv.mkDerivation` that fetches the release tarball via `curl` in `buildCommand`, extracts the kernel binary via the `vmlinux.container` symlink, and stores just the binary (~16MB) in the Nix store. The activation script symlinks the runtime default kernel into `~/Library/Application Support/com.apple.container/kernels/` with a `default.kernel-arm64` symlink, while the x86_64 builder passes its own kernel path directly via `--kernel`.
+The Linux kernel comes from [kata-containers](https://github.com/kata-containers/kata-containers/releases). `pkgs/kernel.nix` is a fixed-output `stdenv.mkDerivation` that fetches the release tarball via `curl` in `buildCommand`, extracts the kernel binary via the `vmlinux.container` symlink, and stores just the binary (~16MB) in the Nix store. The activation script symlinks the runtime default kernel into `~/Library/Application Support/com.apple.container/kernels/` with a `default.kernel-arm64` symlink, while the x86_64 builder passes its own kernel path directly via `--kernel`.
 
-`kernel.nix` accepts `version` and `hash` as overridable function arguments (defaults to the pinned version). Users can call `pkgs.callPackage "${inputs.nix-apple-container}/kernel.nix" { version = "..."; hash = "..."; }` to use a different release without forking the module. Same pattern applies to `package.nix` for the container CLI.
+`pkgs/kernel.nix` accepts `version` and `hash` as overridable function arguments (defaults to the pinned version). Users can call `pkgs.callPackage "${inputs.nix-apple-container}/pkgs/kernel.nix" { version = "..."; hash = "..."; }` to use a different release without forking the module. Same pattern applies to `pkgs/package.nix` for the container CLI.
 
 ### Networking
 - macOS 15: limited networking, no container-to-container, no custom networks

@@ -1,8 +1,12 @@
+MODULE_FILE       := module/default.nix
+BUILDERS_FILE     := module/builders.nix
+PACKAGE_FILE      := pkgs/package.nix
 NIX_VERSION       ?= $(shell sed -n 's/^FROM nixos\/nix:\(.*\)/\1/p' builder/Dockerfile)
 BUILDER_VERSION   ?= $(shell tr -d '\n' < builder/IMAGE_VERSION)
 IMAGE_TAG         := $(BUILDER_VERSION)-nix$(NIX_VERSION)
-CONTAINER_VERSION ?= $(shell sed -n 's/.*version = "\(.*\)".*/\1/p' package.nix | head -1)
+CONTAINER_VERSION ?= $(shell sed -n 's/.*version ? "\(.*\)".*/\1/p' $(PACKAGE_FILE) | head -1)
 IMAGE             := ghcr.io/halfwhey/nix-builder
+SPECIAL_THANKS    ?=
 
 .PHONY: _require_new_version
 _require_new_version:
@@ -17,7 +21,21 @@ release: _require_new_version ## Commit VERSION, push, create GitHub release (NE
 	git tag "$(NEW_VERSION)"
 	git push origin master
 	git push origin "$(NEW_VERSION)"
-	gh release create "$(NEW_VERSION)" --generate-notes
+	tmp=$$(mktemp); \
+	trap 'rm -f "$$tmp"' EXIT; \
+	prev_tag=$$(git describe --tags --abbrev=0 "$(NEW_VERSION)^" 2>/dev/null || true); \
+	if [ -n "$$prev_tag" ]; then \
+		{ \
+			printf '## Commits since %s\n\n' "$$prev_tag"; \
+			git log --reverse --pretty='* %h %s' "$$prev_tag..$(NEW_VERSION)"; \
+		} > "$$tmp"; \
+	else \
+		{ \
+			printf '## Commits in %s\n\n' "$(NEW_VERSION)"; \
+			git log --reverse --pretty='* %h %s' "$(NEW_VERSION)"; \
+		} > "$$tmp"; \
+	fi; \
+	gh release create "$(NEW_VERSION)" --notes-file "$$tmp"
 
 .PHONY: build
 build: ## Build the builder image locally (multi-arch)
@@ -52,9 +70,9 @@ update-nix-builder: ## Check and update nixos/nix base image to latest release
 	@scripts/update-nix-builder.sh
 
 .PHONY: bump-linux-builder
-bump-linux-builder: ## Bump linuxBuilder default image in default.nix to current IMAGE_TAG
-	perl -i -pe 's|ghcr.io/halfwhey/nix-builder:[^"]*|ghcr.io/halfwhey/nix-builder:$(IMAGE_TAG)|' default.nix
-	git add default.nix
+bump-linux-builder: ## Bump linuxBuilder default image in module/builders.nix to current IMAGE_TAG
+	perl -i -pe 's|ghcr.io/halfwhey/nix-builder:[^"]*|ghcr.io/halfwhey/nix-builder:$(IMAGE_TAG)|' $(BUILDERS_FILE)
+	git add $(BUILDERS_FILE)
 	git diff --cached --quiet || git commit -m "chore: bump linuxBuilder default to $(IMAGE_TAG)"
 	git push origin master
 

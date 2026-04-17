@@ -137,12 +137,12 @@ Override `package` (apple/container CLI) or `kernel` (kata-containers) with a di
 services.containerization = {
   enable = true;
 
-  package = pkgs.callPackage "${inputs.nix-apple-container}/package.nix" {
+  package = pkgs.callPackage "${inputs.nix-apple-container}/pkgs/package.nix" {
     version = "0.11.0";
     hash = "sha256-...";
   };
 
-  kernel = pkgs.callPackage "${inputs.nix-apple-container}/kernel.nix" {
+  kernel = pkgs.callPackage "${inputs.nix-apple-container}/pkgs/kernel.nix" {
     version = "3.27.0";
     hash = "sha256-...";
   };
@@ -246,7 +246,7 @@ The x86_64 builder also has its own per-container kernel option:
 
 ```nix
 services.containerization.linux-builder.x86_64.kernel =
-  pkgs.callPackage "${inputs.nix-apple-container}/kernel.nix" {
+  pkgs.callPackage "${inputs.nix-apple-container}/pkgs/kernel.nix" {
     version = "3.24.0";
     hash = "sha256-2pNP+CBvV4DBAeGiwIe8MpdasjcDhc9L2tcRArP7ANw=";
   };

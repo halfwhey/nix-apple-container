@@ -73,9 +73,9 @@ jobs:
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:${{ steps.versions.outputs.tag }}
 
-      - name: Update default.nix
+      - name: Update module/builders.nix
         if: steps.versions.outputs.proceed == 'true'
-        run: perl -i -pe 's|ghcr.io/halfwhey/nix-builder:[^"]*|ghcr.io/halfwhey/nix-builder:${{ steps.versions.outputs.tag }}|' default.nix
+        run: perl -i -pe 's|ghcr.io/halfwhey/nix-builder:[^"]*|ghcr.io/halfwhey/nix-builder:${{ steps.versions.outputs.tag }}|' module/builders.nix
 
       - name: Commit and push
         if: steps.versions.outputs.proceed == 'true'
@@ -83,9 +83,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           if [ "${{ github.event_name }}" = "schedule" ]; then
-            git add builder/Dockerfile default.nix
+            git add builder/Dockerfile module/builders.nix
           else
-            git add default.nix
+            git add module/builders.nix
           fi
           git diff --cached --quiet || git commit -m "chore: bump nix-builder to ${{ steps.versions.outputs.tag }}"
           git push origin master
