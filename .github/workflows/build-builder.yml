@@ -77,15 +77,21 @@ jobs:
         if: steps.versions.outputs.proceed == 'true'
         run: perl -i -pe 's|ghcr.io/halfwhey/nix-builder:[^"]*|ghcr.io/halfwhey/nix-builder:${{ steps.versions.outputs.tag }}|' module/builders.nix
 
+      - name: Update .github/badges/versions.json
+        if: steps.versions.outputs.proceed == 'true'
+        run: |
+          jq --arg v "${{ steps.versions.outputs.tag }}" '.nix_builder = $v' .github/badges/versions.json > .github/badges/versions.json.tmp
+          mv .github/badges/versions.json.tmp .github/badges/versions.json
+
       - name: Commit and push
         if: steps.versions.outputs.proceed == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           if [ "${{ github.event_name }}" = "schedule" ]; then
-            git add builder/Dockerfile module/builders.nix
+            git add builder/Dockerfile module/builders.nix .github/badges/versions.json
           else
-            git add module/builders.nix
+            git add module/builders.nix .github/badges/versions.json
           fi
           git diff --cached --quiet || git commit -m "chore: bump nix-builder to ${{ steps.versions.outputs.tag }}"
           git push origin master

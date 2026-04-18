@@ -10,6 +10,9 @@ A nix-darwin module for declaratively managing [Apple Containerization][apple-co
 [Examples](#examples) •
 [Uninstall](#uninstall)
 
+[![apple/container](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fhalfwhey%2Fnix-apple-container%2Fmaster%2F.github%2Fbadges%2Fversions.json&query=%24.apple_container&label=apple%2Fcontainer&color=000000&logo=apple&logoColor=white)](https://github.com/apple/container/releases/latest)
+[![nix-builder](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fhalfwhey%2Fnix-apple-container%2Fmaster%2F.github%2Fbadges%2Fversions.json&query=%24.nix_builder&label=nix-builder&color=5277C3&logo=nixos&logoColor=white)](https://github.com/halfwhey/nix-apple-container/pkgs/container/nix-builder)
+
 </div>
 
 ## What it does

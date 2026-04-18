@@ -39,11 +39,17 @@ jobs:
           sed -i "s|hash ? \".*\"|hash ? \"${SRI}\"|" pkgs/package.nix
           echo "Updated pkgs/package.nix to $LATEST (hash: $SRI)"
 
+      - name: Update .github/badges/versions.json
+        if: steps.versions.outputs.current != steps.versions.outputs.latest
+        run: |
+          jq --arg v "${{ steps.versions.outputs.latest }}" '.apple_container = $v' .github/badges/versions.json > .github/badges/versions.json.tmp
+          mv .github/badges/versions.json.tmp .github/badges/versions.json
+
       - name: Commit and push
         if: steps.versions.outputs.current != steps.versions.outputs.latest
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add pkgs/package.nix
+          git add pkgs/package.nix .github/badges/versions.json
           git commit -m "chore: bump apple/container to ${{ steps.versions.outputs.latest }}"
           git push origin master
