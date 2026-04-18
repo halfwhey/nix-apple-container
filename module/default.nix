@@ -35,9 +35,11 @@ let
   nixImagePaths = lib.mapAttrs' (_: r: lib.nameValuePair r.imageRef "${r.copyTo}") resolvedImages;
 
   appSupport = "${userHome}/Library/Application Support/com.apple.container";
+  launchdStateDir = "/tmp/nix-apple-container-${cfg.user}";
   managedAgentDir = launchAgentsDir;
   runtimeAgentPath = "${managedAgentDir}/${runtimeLabel}.plist";
   logContextVar = "NAC_LOG_CONTEXT";
+  changedManagedLabelsPath = "${launchdStateDir}/changed-managed-labels";
 
   userDomainLoop = uidExpr: body: ''
     for domain in "gui/${uidExpr}" "user/${uidExpr}"; do
@@ -49,7 +51,8 @@ let
     ${userDomainLoop "$CONTAINER_UID" ''
       launchctl print "$domain" >/dev/null 2>&1 || continue
       launchctl print "$domain" 2>/dev/null \
-        | awk '/^[[:space:]]*dev\.apple\.container\.[^[:space:]]+[[:space:]]*=/{print $1}' \
+        | awk '{for(i=1;i<=NF;i++){f=$i;gsub(/^"|"$/,"",f);if(f~/^dev\.apple\.container\.[A-Za-z0-9_.-]+$/){print f;break}}}' \
+        | sort -u \
         | while IFS= read -r label; do
             [ -n "$label" ] || continue
             ${logCommand}
@@ -92,14 +95,72 @@ let
       )
     }
 
+    # `launchctl print <domain>` output format varies by macOS version: modern
+    # releases list services as `<pid>\t<status>\t<label>`, older releases used
+    # `<label> = <value>`, and endpoints may use quoted labels. Match any
+    # `dev.apple.container.*` token on any field (stripping surrounding quotes)
+    # so label discovery works across formats.
+    nac_list_managed_labels() {
+      local domain="$1"
+
+      launchctl print "$domain" >/dev/null 2>&1 || return 0
+      launchctl print "$domain" 2>/dev/null \
+        | awk '{for(i=1;i<=NF;i++){f=$i;gsub(/^"|"$/,"",f);if(f~/^dev\.apple\.container\.[A-Za-z0-9_.-]+$/){print f;break}}}' \
+        | sort -u
+    }
+
+    nac_label_in_file() {
+      local label="$1"
+      local file="$2"
+
+      [ -f "$file" ] || return 1
+      grep -Fx -- "$label" "$file" >/dev/null 2>&1
+    }
+
+    nac_wait_for_label_unload() {
+      local domain="$1"
+      local label="$2"
+      local timeout="''${3:-30}"
+      local waited=0
+
+      while [ "$waited" -lt "$timeout" ]; do
+        launchctl print "$domain/$label" >/dev/null 2>&1 || return 0
+        sleep 1
+        waited=$((waited + 1))
+      done
+
+      launchctl print "$domain/$label" >/dev/null 2>&1 && return 1
+      return 0
+    }
+
+    # Forward shutdown signals to the $run_pid child (when present) so launchd's
+    # bootout reaps the process group promptly. Otherwise the wrapper exits but
+    # `container run` lingers, keeping the service registered while launchctl
+    # bootstrap races with the pending unload (fails with status 5).
+    nac_kill_child() {
+      if [ -n "''${run_pid:-}" ] && kill -0 "$run_pid" 2>/dev/null; then
+        nac_log "forwarding shutdown to container run child pid=$run_pid"
+        kill "$run_pid" 2>/dev/null || true
+        nac_wait_count=0
+        while kill -0 "$run_pid" 2>/dev/null && [ "$nac_wait_count" -lt 10 ]; do
+          sleep 1
+          nac_wait_count=$((nac_wait_count + 1))
+        done
+        if kill -0 "$run_pid" 2>/dev/null; then
+          nac_log "container run child still alive after 10s; sending SIGKILL"
+          kill -9 "$run_pid" 2>/dev/null || true
+        fi
+      fi
+    }
+
     nac_capture_streams
     nac_log "script start pid=$$"
     trap 'status=$?; nac_log "script exit status=$status"' EXIT
-    trap 'nac_log "received SIGHUP"; exit 129' HUP
-    trap 'nac_log "received SIGINT"; exit 130' INT
-    trap 'nac_log "received SIGQUIT"; exit 131' QUIT
-    trap 'nac_log "received SIGTERM"; exit 143' TERM
-    trap 'nac_log "received SIGABRT"; exit 134' ABRT
+    trap 'nac_log "received SIGHUP"; nac_kill_child; exit 129' HUP
+    trap 'nac_log "received SIGINT"; nac_kill_child; exit 130' INT
+    trap 'nac_log "received SIGQUIT"; nac_kill_child; exit 131' QUIT
+    trap 'nac_log "received SIGTERM"; nac_kill_child; exit 143' TERM
+    trap 'nac_log "received SIGABRT"; nac_kill_child; exit 134' ABRT
   '';
 
   autoStartContainers = lib.filterAttrs (_: c: c.autoStart) cfg.containers;
@@ -113,7 +174,7 @@ let
 
     set -e -o pipefail
 
-    for cmd in awk basename id launchctl mkdir rm sudo; do
+    for cmd in awk basename chmod grep id launchctl mkdir rm sudo touch; do
       command -v "$cmd" >/dev/null 2>&1 || {
         nac_log "'$cmd' is required but not found in PATH"
         exit 1
@@ -185,16 +246,53 @@ let
 
     launchctl enable "$CONTAINER_DOMAIN/${runtimeLabel}" >/dev/null 2>&1 || true
 
-    ${bootoutManagedLabelsScript ''nac_log "booting out stale managed label '$label' from '$domain'"''}
+    changed_labels_file="${changedManagedLabelsPath}"
+    desired_labels_file="${launchdStateDir}/desired-managed-labels.$$"
+    mkdir -p "${launchdStateDir}"
+    if [ "$(id -u)" -eq 0 ]; then
+      touch "$changed_labels_file"
+      chmod 644 "$changed_labels_file"
+    fi
+    : > "$desired_labels_file"
 
     found_managed_plist=0
     for plist in "${managedAgentDir}"/dev.apple.container.*.plist; do
       [ -f "$plist" ] || continue
       found_managed_plist=1
       label="$(basename "$plist" .plist)"
+      printf '%s\n' "$label" >> "$desired_labels_file"
+    done
+
+    ${userDomainLoop "$CONTAINER_UID" ''
+      nac_list_managed_labels "$domain" | while IFS= read -r label; do
+        [ -n "$label" ] || continue
+        if nac_label_in_file "$label" "$desired_labels_file"; then
+          if [ "$domain" != "$CONTAINER_DOMAIN" ]; then
+            nac_log "booting out duplicate managed label '$label' from '$domain'"
+            launchctl bootout "$domain/$label" 2>/dev/null || true
+          fi
+        else
+          nac_log "booting out stale managed label '$label' from '$domain'"
+          launchctl bootout "$domain/$label" 2>/dev/null || true
+        fi
+      done
+    ''}
+
+    for plist in "${managedAgentDir}"/dev.apple.container.*.plist; do
+      [ -f "$plist" ] || continue
+      label="$(basename "$plist" .plist)"
       if launchctl print "$CONTAINER_DOMAIN/$label" >/dev/null 2>&1; then
-        nac_log "booting out existing managed label '$label' from '$CONTAINER_DOMAIN' before bootstrap"
-        launchctl bootout "$CONTAINER_DOMAIN/$label" 2>/dev/null || true
+        if [ "$(id -u)" -eq 0 ] && nac_label_in_file "$label" "$changed_labels_file"; then
+          nac_log "reloading changed managed label '$label' in '$CONTAINER_DOMAIN'"
+          launchctl bootout "$CONTAINER_DOMAIN/$label" 2>/dev/null || true
+          if ! nac_wait_for_label_unload "$CONTAINER_DOMAIN" "$label" 30; then
+            nac_log "timed out waiting for '$label' to unload from '$CONTAINER_DOMAIN'"
+            exit 1
+          fi
+        else
+          nac_log "managed label '$label' already loaded in '$CONTAINER_DOMAIN'; skipping bootstrap"
+          continue
+        fi
       fi
       nac_log "bootstrapping '$label' from '$plist' into '$CONTAINER_DOMAIN'"
       launchctl enable "$CONTAINER_DOMAIN/$label" >/dev/null 2>&1 || true
@@ -206,6 +304,10 @@ let
       nac_log "no managed container plists found in ${managedAgentDir}"
     fi
 
+    if [ "$(id -u)" -eq 0 ]; then
+      : > "$changed_labels_file"
+    fi
+    rm -f "$desired_labels_file"
     nac_log "bootstrap-managed-containers completed"
   '';
   # Extract host paths from volume strings (host:container) for containers with autoCreateMounts
@@ -476,20 +578,64 @@ let
   ) autoStartContainers;
 
   syncLaunchdFilesScript = pkgs.writeShellScript "sync-container-launchd-files" ''
-    for cmd in install rm; do
+    for cmd in chmod cmp install rm touch; do
       command -v "$cmd" >/dev/null 2>&1 || {
         echo "nix-apple-container: '$cmd' is required but not found in PATH" >&2
         exit 1
       }
     done
 
+    sync_plist() {
+      local label="$1"
+      local src="$2"
+      local dest="$3"
+      local track_changes="$4"
+
+      if [ ! -f "$dest" ] || ! cmp -s "$src" "$dest"; then
+        install -o root -g wheel -m 644 "$src" "$dest"
+        if [ "$track_changes" = 1 ]; then
+          printf '%s\n' "$label" >> "$changed_labels_file"
+        fi
+      fi
+    }
+
     install -d -m 755 -o root -g wheel "${managedAgentDir}"
-    install -o root -g wheel -m 644 "${runtimePlist}" "${runtimeAgentPath}"
-    rm -f "${managedAgentDir}"/dev.apple.container.*.plist
-    rm -rf "${appSupport}/launchd"
+    install -d -m 1777 "${launchdStateDir}"
+    changed_labels_file="${changedManagedLabelsPath}"
+    touch "$changed_labels_file"
+    chmod 644 "$changed_labels_file"
+    : > "$changed_labels_file"
+    sync_plist "${runtimeLabel}" "${runtimePlist}" "${runtimeAgentPath}" 0
+    ${
+      if containerPlists == { } then
+        ''
+          rm -f "${managedAgentDir}"/dev.apple.container.*.plist
+        ''
+      else
+        let
+          desiredPatterns = lib.concatStringsSep "|" (
+            lib.mapAttrsToList (label: _: lib.escapeShellArg label) containerPlists
+          );
+        in
+        ''
+          for existing in "${managedAgentDir}"/dev.apple.container.*.plist; do
+            [ -f "$existing" ] || continue
+            label="$(basename "$existing" .plist)"
+            keep=0
+            case "$label" in
+              ${desiredPatterns})
+                keep=1
+                ;;
+            esac
+            if [ "$keep" -eq 0 ]; then
+              rm -f "$existing"
+            fi
+          done
+        ''
+    }
     ${lib.concatStrings (
       lib.mapAttrsToList (_: spec: ''
-        install -o root -g wheel -m 644 "${spec.plist}" "${spec.targetPath}"
+        sync_plist "${spec.label}" "${spec.plist}" "${spec.targetPath}" 1
       '') containerPlists
     )}
   '';
@@ -546,6 +692,7 @@ in
         fi
         rm -f "${runtimeAgentPath}"
         rm -f "${managedAgentDir}"/dev.apple.container.*.plist
+        rm -rf "${launchdStateDir}"
         rm -rf "${appSupport}/launchd"
         rm -f "${userBuilderKey}" "${userBuilderPubKey}"
         rm -f "${systemBuilderKey}" "${systemBuilderPubKey}"

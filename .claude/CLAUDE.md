@@ -54,7 +54,7 @@ nix-darwin activation order: `preActivation` → `launchd` → `userLaunchd` →
 The module uses:
 - `preActivation`: sync launchd plist assets, runtime start, kernel install, image loading (nix2container), registry image pre-pull for auto-start containers, mount dir creation, container pruning
 - Main activation (nix-darwin): no module-owned launchd jobs are loaded here; user-domain jobs are managed explicitly
-- `postActivation`: stop undeclared containers, bootstrap current managed container jobs, builder SSH setup
+- `postActivation`: remove undeclared containers declaratively (bootout + clear stale launchd override + delete plist + stop/rm), then bootstrap current managed container jobs, builder SSH setup
 
 ### Activation (enable = true)
 
@@ -66,13 +66,23 @@ The module uses:
 5. Prunes stopped containers (`container prune`)
 
 `postActivation`:
-1. Stops and removes containers not declared in config
+1. Removes undeclared containers declaratively:
+   - `launchctl bootout` the old `dev.apple.container.<name>` label from `gui/<uid>` and `user/<uid>`
+   - `launchctl enable` the same label in those domains to clear any stale disabled override
+   - delete `/Library/LaunchAgents/dev.apple.container.<name>.plist`
+   - `container stop` + `container rm`
+2. Bootstraps the currently declared managed plists into the resolved user launchd domain
 
 ### Containers (autoStart = true)
 
 The runtime itself is a Background-session LaunchAgent plist (`/Library/LaunchAgents/nix-apple-container.runtime.plist`) for `system.primaryUser`. This keeps Apple `container` in the user's launchd domain, which is what upstream expects for the apiserver/XPC path. It does mean the runtime only comes up after the first session for that user exists (GUI login or SSH/background session).
 
-Auto-start containers are separate plists stored in `/Library/LaunchAgents/`. The module bootstraps those plists into `user/<uid>` explicitly after `container system start` succeeds, instead of relying on nix-darwin's `userLaunchd` `load -w` path. Before each bootstrap, activation explicitly `bootout`s the target label in the resolved domain if it is already loaded, so re-bootstrap works even when the container is already running. The plists themselves stay passive (`RunAtLoad = false`) and use `KeepAlive.OtherJobEnabled."com.apple.container.apiserver" = true`, so launchd only starts them once the runtime has registered the apiserver.
+Auto-start containers are separate plists stored in `/Library/LaunchAgents/`. The module bootstraps those plists into `user/<uid>` explicitly after `container system start` succeeds, instead of relying on nix-darwin's `userLaunchd` `load -w` path. Before each bootstrap, activation explicitly `bootout`s the target label in the resolved domain if it is already loaded and then polls `launchctl print "$domain/$label"` until the service is fully gone (up to 30s), so re-bootstrap works even while the previous container is still being torn down. The plists themselves stay passive (`RunAtLoad = false`) and use `KeepAlive.OtherJobEnabled."com.apple.container.apiserver" = true`, so launchd only starts them once the runtime has registered the apiserver.
+
+Important launchd semantics:
+- `launchctl bootstrap ... <plist>` is not a declarative replace operation. If the label is already loaded in that domain, bootstrap can fail with `5` instead of replacing it. Explicit `bootout` first is required, and since `bootout` is asynchronous (returns before the process group is fully reaped), callers must poll `launchctl print "$domain/$label"` until it fails before re-bootstrapping.
+- `launchctl disable` is sticky state in launchd's disabled database. It does NOT remove the plist and it survives reboots. For declarative removal, do not rely on `disable`; clear stale overrides with `enable`, remove the plist, and boot the job out.
+- `launchctl list` is not a filesystem view. `PID` `-` plus status `1` means the last exit status for that known label was `1`; it does not prove the plist still exists on disk.
 
 Each container's `ProgramArguments` points to a wrapper script (`mkContainerRunScript`) that:
 1. Stops and removes any existing container with the same name
@@ -147,6 +157,8 @@ The user's home directory is resolved at Nix eval time via `userHome` (checks `c
 
 For reconciliation, prefer `container ls --all --quiet` over parsing `--format json`. The quiet output is the stable container ID/name list; the JSON shape is not a good contract for activation scripts.
 
+`container prune` only removes stopped containers. It is not sufficient for drift cleanup. Running undeclared containers must still be found with `container ls --all --quiet` and explicitly stopped/removed.
+
 ## Idempotency and cleanup principles
 
 Every activation script and feature MUST follow these rules:
@@ -165,7 +177,7 @@ Every feature that creates state outside the Nix store MUST clean it up when dis
 | Component | State created | Cleanup when disabled |
 |-----------|--------------|----------------------|
 | Module (`enable`) | `~/Library/Application Support/com.apple.container/`, defaults, pkg receipt | Teardown block with `!cfg.enable` guard; selective cleanup based on `preserveImagesOnDisable` and `preserveVolumesOnDisable`; also removes builder files |
-| Containers (`autoStart`) | Managed plists in `/Library/LaunchAgents/`, bootstrapped `dev.apple.container.*` jobs, running container VMs | postActivation bootstraps the current plist set; teardown bootouts all managed labels and removes the managed plists |
+| Containers (`autoStart`) | Managed plists in `/Library/LaunchAgents/`, bootstrapped `dev.apple.container.*` jobs, running container VMs | postActivation removes undeclared jobs declaratively and bootstraps the current plist set; teardown bootouts all managed labels, clears stale launchd disabled overrides, and removes the managed plists |
 | Linux builders (`linux-builder.{aarch64,x86_64}.enable`) | `/etc/nix/builder_ed25519*`, `programs.ssh.extraConfig`, `nix.buildMachines` (declarative), `determinateNix.customSettings` (Determinate), containers `nix-builder-aarch64` / `nix-builder-amd64` | `!anyBuilderEnabled` block removes SSH key; containers removed by reconciliation; declarative options cleared by nix-darwin |
 | Kernel | Symlinks in `$APP_SUPPORT/kernels/` pointing to Nix store | Removed with kernels dir on teardown (always cleaned); binary in Nix store protected by system profile |
 | Images (`images.*`) | Images loaded into runtime's own storage via `container image load` | Removed with `content/` unless `preserveImagesOnDisable = true` |
@@ -209,6 +221,14 @@ Pre-building OCI layout dirs as Nix derivations (`runCommand` with `copyTo`) and
 ### Headless Mac: first user session still required
 Apple `container` expects its apiserver in the user's launchd domain. A pure system-daemon setup breaks the client's XPC path even though `LaunchDaemon + UserName` is valid launchd. The module therefore installs Background-session LaunchAgent plists for `system.primaryUser` in `/Library/LaunchAgents` and intentionally requires the first session for that user after boot. A GUI login works, and an SSH login as that same user also works because Apple `container` can run in the `Background` domain.
 
+### Apple `container` follows the current launchd domain, not an arbitrary one
+Upstream `container system start` is a one-shot command that registers `com.apple.container.apiserver` into the launchd bootstrap domain of the current session. In practice that means:
+- GUI login session → `gui/<uid>`
+- headless/background/SSH session → `user/<uid>`
+- system/root session → `system`
+
+This is why the module must keep Apple `container` in the user's domain and cannot treat it like a normal system daemon. `LaunchDaemon + UserName` is valid launchd, but it is the wrong XPC domain for the upstream client.
+
 ### Stale apiserver launchd registration hangs all CLI commands
 If the `container` CLI was previously run from a different install path (e.g., a source build in `.build/debug/`, or a Nix store path that was later garbage collected), launchd retains the apiserver registration pointing to the old binary. Every `container` command — including `--help`, `system status`, `system stop` — hangs indefinitely at "checking if APIServer is alive" because XPC blocks waiting for launchd to activate a binary that doesn't exist (launchd enters exponential throttle). Manual fix: `launchctl bootout user/$(id -u)/com.apple.container.apiserver`. See [#1329](https://github.com/apple/container/issues/1329).
 
@@ -216,6 +236,21 @@ The module handles this automatically in preActivation: before checking `system 
 
 ### Kernel install prompt
 `container system start` prompts interactively: "Install the recommended default kernel from [URL]? [Y/n]:". This hangs non-interactive environments. The module uses `--disable-kernel-install` on `system start` and manages the runtime default kernel declaratively — `pkgs/kernel.nix` extracts the binary into the Nix store, and the activation script symlinks it into the runtime's `kernels/` directory. Individual containers can still override this with `container run --kernel`; the x86_64 Nix builder uses that hook to pin a Rosetta-compatible kernel.
+
+### `launchctl bootstrap` fails with status 5 if the label is already loaded
+During the explicit `/Library/LaunchAgents` bootstrap flow, `launchctl bootstrap user/<uid> <plist>` can fail with `Bootstrap failed: 5: Input/output error` when the target `dev.apple.container.*` label is already present in that domain. This is not necessarily a bad plist; it can just mean the job is already loaded. Fix: `bootout` the exact label first, then bootstrap it again.
+
+### `container prune` is not drift reconciliation
+`container prune` only removes stopped containers. It will not delete running undeclared containers. Drift reconciliation must enumerate containers with `container ls --all --quiet` and explicitly `stop` + `rm` anything not declared in config.
+
+### `launchctl disable` leaves persistent declarative residue
+`launchctl disable` writes to launchd's persistent disabled database. That state survives plist deletion and can still show up in `launchctl list` / `print-disabled` after the service is removed from config. For declarative cleanup, the correct sequence is: `bootout` the label, `enable` the label to clear any stale disabled override, then remove the plist and stop/rm the container if needed.
+
+### `launchctl list` status column is last exit status
+In `launchctl list`, the second column is the service's `LastExitStatus`, not an enabled/disabled flag and not proof that the plist still exists. A line like `-    1    dev.apple.container.gitea` means launchd still knows about that label and the last exit status was `1`; it does not by itself tell you whether the plist is still on disk. Use `launchctl print-disabled`, `launchctl print <domain>/<label>`, and `ls /Library/LaunchAgents/*.plist` together when debugging.
+
+### Activation failures do not roll back earlier successful bootstraps
+The managed-container bootstrap script runs container plists one by one under `set -e`. If one bootstrap succeeds and a later one fails, activation aborts but the earlier job stays loaded and may already have started its container. This is why a rebuild can fail overall while one declared container still comes up successfully.
 
 ## Apple Containerization quirks
 
@@ -242,6 +277,26 @@ All state under `~/Library/Application Support/com.apple.container/`:
 - `kernels/` — Linux kernels + `default.kernel-arm64` symlink
 - `content/blobs/` — image layers
 - `content/ingest/` — temporary download staging
+- `volumes/<name>/volume.img` — named volumes as ext filesystem disk images
+
+### Named volumes are sparse disk images, not plain directories
+Apple named volumes are stored as sparse disk images (`volume.img`) under the runtime state directory. That leads to two easy debugging traps:
+- `du` shows allocated blocks, which can be tiny
+- `ls -lh`, `stat`, and `rsync --progress` show the logical file size, which can be many GB
+
+So a volume image can look like `66M` on disk while `rsync` reports a `9.4G` transfer. That is normal sparse-file behavior. It does NOT mean `rsync` found 9.4G of real data.
+
+If `file volume.img` reports `mounted or unclean` or `(errors)`, treat that as volume/filesystem damage or an unclean shutdown signal inside the ext image, not as a launchd problem.
+
+### Bind mounts use shared-directory/virtiofs semantics
+Bind mounts are not the same as named volumes. Named volumes are block-backed disk images inside Apple `container` state; bind mounts use the VM shared-directory device (virtiofs-style host sharing).
+
+Practical consequences:
+- external or unusual host paths under `/Volumes/...` can fail before the container even starts with `VZErrorDomain Code=2` / `NSPOSIXErrorDomain Code=1 "Operation not permitted"`
+- permission/ownership behavior at the mountpoint can be surprising compared to Docker on Linux
+- directly bind-mounting an app's canonical data directory as the mountpoint can be fragile; mounting a parent directory and letting the app use a subdirectory under it is safer
+
+This matters for stateful services like Gitea. If a named volume fails with bad persisted data, that is a volume/filesystem issue. If a bind mount fails with `VZErrorDomain` before boot, that is a host-path/shared-directory issue.
 
 ### container system start internals
 `container system start` is NOT a long-running daemon. It:
