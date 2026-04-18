@@ -29,60 +29,9 @@ let
   nixImagePaths = lib.mapAttrs' (_: r: lib.nameValuePair r.imageRef "${r.copyTo}") resolvedImages;
 
   appSupport = "${userHome}/Library/Application Support/com.apple.container";
-  agentDir = "${userHome}/Library/LaunchAgents";
-  systemAgentDir = "/Library/LaunchAgents";
   runtimeLabel = "nix-apple-container.runtime";
   userBuilderKey = "${userHome}/.ssh/nix-builder_ed25519";
   userBuilderPubKey = "${userHome}/.ssh/nix-builder_ed25519.pub";
-
-  mkAgentUnloadScript = declaredAgents: ''
-    CONTAINER_UID=$(id -u "${cfg.user}" 2>/dev/null || echo "")
-    if [ -n "$CONTAINER_UID" ] && [ -d "${agentDir}" ]; then
-      for plist in "${agentDir}"/dev.apple.container.*.plist; do
-        [ -f "$plist" ] || continue
-        agent_name="$(basename "$plist" .plist)"
-        ${lib.optionalString (declaredAgents != "") ''
-          KEEP=false
-          # shellcheck disable=SC2043
-          for d in ${declaredAgents}; do
-            if [ "$agent_name" = "$d" ]; then KEEP=true; break; fi
-          done
-          if [ "$KEEP" = "true" ]; then continue; fi
-        ''}
-        echo "nix-apple-container: unloading agent $agent_name..."
-        launchctl asuser "$CONTAINER_UID" sudo --user="${cfg.user}" -- launchctl unload "$plist" 2>/dev/null || true
-        sudo --user="${cfg.user}" -- rm -f "$plist"
-      done
-    fi
-  '';
-
-  # Remove the legacy runtime LaunchAgent. Runtime startup needs to happen at
-  # boot, so the job lives in the system daemon domain while containers remain
-  # per-user agents.
-  legacyRuntimeAgentCleanup = ''
-    CONTAINER_UID=$(id -u "${cfg.user}" 2>/dev/null || echo "")
-    LEGACY_RUNTIME_PLIST="${agentDir}/${runtimeLabel}.plist"
-    if [ -n "$CONTAINER_UID" ] && [ -f "$LEGACY_RUNTIME_PLIST" ]; then
-      echo "nix-apple-container: removing legacy runtime agent..."
-      launchctl asuser "$CONTAINER_UID" sudo --user="${cfg.user}" -- launchctl unload "$LEGACY_RUNTIME_PLIST" 2>/dev/null || true
-      sudo --user="${cfg.user}" -- rm -f "$LEGACY_RUNTIME_PLIST"
-    fi
-  '';
-
-  legacySystemAgentCleanup = ''
-    CONTAINER_UID=$(id -u "${cfg.user}" 2>/dev/null || echo "")
-    if [ -d "${systemAgentDir}" ]; then
-      for plist in "${systemAgentDir}/${runtimeLabel}.plist" "${systemAgentDir}"/dev.apple.container.*.plist; do
-        [ -f "$plist" ] || continue
-        agent_name="$(basename "$plist" .plist)"
-        echo "nix-apple-container: removing legacy system launch agent $agent_name..."
-        if [ -n "$CONTAINER_UID" ]; then
-          launchctl bootout "gui/$CONTAINER_UID/$agent_name" 2>/dev/null || true
-        fi
-        rm -f "$plist"
-      done
-    fi
-  '';
 
   autoStartContainers = lib.filterAttrs (_: c: c.autoStart) cfg.containers;
 
@@ -205,16 +154,13 @@ in
   imports = [
     ./options.nix
     ./builders.nix
+    ./compat.nix
   ];
 
   config = lib.mkMerge ([
     # Teardown: runs when module is disabled (guarded — only if state exists)
     (lib.mkIf (!cfg.enable) {
       system.activationScripts.postActivation.text = lib.mkAfter ''
-        ${mkAgentUnloadScript ""}
-        ${legacyRuntimeAgentCleanup}
-        ${legacySystemAgentCleanup}
-
         APP_SUPPORT="${userHome}/Library/Application Support/com.apple.container"
 
         if [ -d "$APP_SUPPORT" ]; then
@@ -269,12 +215,6 @@ in
           nameserver 127.0.0.1
           port 2053
         '';
-
-        # Accept the previously hand-written resolver file on first migration
-        # so activation can replace it with the declarative /etc symlink.
-        knownSha256Hashes = [
-          "99b89c6edbb7edea675a76545841411eec5cca0d6222be61769f83f5828691b6"
-        ];
       };
 
       system.defaults.CustomUserPreferences = lib.mkIf (cfg.user == config.system.primaryUser) {
@@ -326,13 +266,6 @@ in
       system.activationScripts.preActivation.text = lib.mkAfter (
         lib.concatStrings [
           ''
-            # The broken launchd.agents regression wrote module-owned plists
-            # into system launchd locations. Remove them before nix-darwin's
-            # launchd phases run so they cannot conflict with the restored
-            # userLaunchd setup.
-            ${legacySystemAgentCleanup}
-            ${legacyRuntimeAgentCleanup}
-
             # If the apiserver is registered but its binary no longer exists (e.g.
             # package upgrade + nix-collect-garbage), launchd can't activate it and
             # every CLI command hangs.  Deregister the stale service so system start
@@ -373,38 +306,22 @@ in
       );
 
       # Reconcile containers: stop+rm undeclared containers.
-      system.activationScripts.postActivation.text = lib.mkAfter (
-        let
-          declaredAgentNames = lib.concatStringsSep " " (
-            map (n: "dev.apple.container.${n}") (lib.attrNames autoStartContainers)
-          );
-        in
-        ''
-          echo "nix-apple-container: reconciling containers..."
+      system.activationScripts.postActivation.text = lib.mkAfter ''
+        echo "nix-apple-container: reconciling containers..."
 
-          ${mkAgentUnloadScript declaredAgentNames}
-          ${legacyRuntimeAgentCleanup}
-
-          # Now stop and remove containers not declared in config
-          DECLARED="${lib.concatStringsSep " " (lib.attrNames cfg.containers)}"
-          for cid in $(${runAs} ${bin} ls --all --format json 2>/dev/null | ${pkgs.jq}/bin/jq -r '.[].configuration.id // empty' 2>/dev/null); do
-            KEEP=false
-            for d in $DECLARED; do
-              if [ "$cid" = "$d" ]; then KEEP=true; break; fi
-            done
-            if [ "$KEEP" = "false" ]; then
-              echo "nix-apple-container: stopping undeclared container $cid..."
-              ${runAs} ${bin} stop "$cid" 2>/dev/null || true
-              ${runAs} ${bin} rm "$cid" 2>/dev/null || true
-            fi
+        # Now stop and remove containers not declared in config
+        DECLARED="${lib.concatStringsSep " " (lib.attrNames cfg.containers)}"
+        for cid in $(${runAs} ${bin} ls --all --format json 2>/dev/null | ${pkgs.jq}/bin/jq -r '.[].configuration.id // empty' 2>/dev/null); do
+          KEEP=false
+          for d in $DECLARED; do
+            if [ "$cid" = "$d" ]; then KEEP=true; break; fi
           done
-        ''
-      );
-
-      system.activationScripts.etc.text = lib.mkAfter ''
-        if [ -e /etc/resolver/containerization.test.before-nix-darwin ]; then
-          rm /etc/resolver/containerization.test.before-nix-darwin
-        fi
+          if [ "$KEEP" = "false" ]; then
+            echo "nix-apple-container: stopping undeclared container $cid..."
+            ${runAs} ${bin} stop "$cid" 2>/dev/null || true
+            ${runAs} ${bin} rm "$cid" 2>/dev/null || true
+          fi
+        done
       '';
     })
 

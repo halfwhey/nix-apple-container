@@ -168,38 +168,6 @@ let
     ];
 in
 {
-  imports = [
-    # Backward compat: linuxBuilder.* → linux-builder.aarch64.* / linux-builder.image
-    (lib.mkRenamedOptionModule
-      [ "services" "containerization" "linuxBuilder" "enable" ]
-      [ "services" "containerization" "linux-builder" "aarch64" "enable" ]
-    )
-    (lib.mkRenamedOptionModule
-      [ "services" "containerization" "linuxBuilder" "image" ]
-      [ "services" "containerization" "linux-builder" "image" ]
-    )
-    (lib.mkRenamedOptionModule
-      [ "services" "containerization" "linuxBuilder" "sshPort" ]
-      [ "services" "containerization" "linux-builder" "aarch64" "sshPort" ]
-    )
-    (lib.mkRenamedOptionModule
-      [ "services" "containerization" "linuxBuilder" "maxJobs" ]
-      [ "services" "containerization" "linux-builder" "aarch64" "maxJobs" ]
-    )
-    (lib.mkRenamedOptionModule
-      [ "services" "containerization" "linuxBuilder" "speedFactor" ]
-      [ "services" "containerization" "linux-builder" "aarch64" "speedFactor" ]
-    )
-    (lib.mkRenamedOptionModule
-      [ "services" "containerization" "linuxBuilder" "cores" ]
-      [ "services" "containerization" "linux-builder" "aarch64" "cores" ]
-    )
-    (lib.mkRenamedOptionModule
-      [ "services" "containerization" "linuxBuilder" "memory" ]
-      [ "services" "containerization" "linux-builder" "aarch64" "memory" ]
-    )
-  ];
-
   options.services.containerization."linux-builder" = {
     image = lib.mkOption {
       type = lib.types.str;
