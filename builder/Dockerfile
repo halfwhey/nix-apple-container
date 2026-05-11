@@ -1,4 +1,4 @@
-FROM nixos/nix:2.34.6
+FROM nixos/nix:2.34.7
 
 LABEL org.opencontainers.image.source=https://github.com/halfwhey/nix-apple-container
 
