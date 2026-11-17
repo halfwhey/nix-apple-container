@@ -189,29 +189,17 @@ let
     fi
 
     CONTAINER_MANAGER=$(launchctl managername 2>/dev/null || echo "")
-    CONTAINER_DOMAIN=""
-    case "$CONTAINER_MANAGER" in
-      Aqua)
-        CONTAINER_DOMAIN="gui/$CONTAINER_UID"
-        ;;
-      Background)
-        CONTAINER_DOMAIN="user/$CONTAINER_UID"
-        ;;
-      *)
-        if launchctl print "user/$CONTAINER_UID" >/dev/null 2>&1; then
-          CONTAINER_DOMAIN="user/$CONTAINER_UID"
-        elif launchctl print "gui/$CONTAINER_UID" >/dev/null 2>&1; then
-          CONTAINER_DOMAIN="gui/$CONTAINER_UID"
-        fi
-        ;;
-    esac
+    CONTAINER_DOMAIN="user/$CONTAINER_UID"
+    if ! launchctl print "$CONTAINER_DOMAIN" >/dev/null 2>&1; then
+      CONTAINER_DOMAIN=""
+    fi
 
     if [ -z "$CONTAINER_DOMAIN" ]; then
       if [ "$CURRENT_USER" = "${cfg.user}" ]; then
-        nac_log "could not determine a user launchd domain for uid $CONTAINER_UID while running as ${cfg.user}; failing so launchd can retry"
+        nac_log "could not determine a background user launchd domain for uid $CONTAINER_UID while running as ${cfg.user}; failing so launchd can retry"
         exit 1
       fi
-      nac_log "no user launchd domain for uid $CONTAINER_UID yet; deferring managed container bootstrap until the first ${cfg.user} session"
+      nac_log "no background user launchd domain for uid $CONTAINER_UID yet; deferring managed container bootstrap until the first ${cfg.user} session"
       exit 0
     fi
 
@@ -220,7 +208,7 @@ let
       CONTAINER_MANAGER_DISPLAY="unknown"
     fi
 
-    nac_log "resolved launchd manager='$CONTAINER_MANAGER_DISPLAY' domain='$CONTAINER_DOMAIN' user='${cfg.user}'"
+    nac_log "resolved launchd manager='$CONTAINER_MANAGER_DISPLAY' target domain='$CONTAINER_DOMAIN' user='${cfg.user}'"
     mkdir -p "${appSupport}"
 
     run_container() {
