@@ -182,7 +182,7 @@ in
   options.services.containerization."linux-builder" = {
     image = lib.mkOption {
       type = lib.types.str;
-      default = "ghcr.io/halfwhey/nix-builder:v2-nix2.35.6";
+      default = "ghcr.io/halfwhey/nix-builder:v2-nix2.36.0";
       description = "Docker image for the Nix remote builder (multi-arch, shared across architectures).";
     };
   }
